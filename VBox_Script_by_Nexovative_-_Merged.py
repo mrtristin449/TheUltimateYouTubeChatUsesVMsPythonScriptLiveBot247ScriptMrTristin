@@ -19,6 +19,12 @@ for _a in sys.argv[1:]:
             _LAUNCH_FLASK_PORT = None
         break
 
+# ── Detect "--autostart-everything" (set by the auto-update/hot-reload relaunch
+#    pipeline's generated batch file on the freshly downloaded *_autostarteverything.py
+#    copy) -- tells this instance to read video_id.json and self-start the bot,
+#    extra streams, and the web dashboard without anyone at the keyboard. ──
+_AUTOSTART_EVERYTHING = "--autostart-everything" in sys.argv[1:]
+
 # ========================= UAC ELEVATION =========================
 # If not already running as administrator, re-launch with ShellExecuteW
 # so Windows shows the UAC prompt. The original process exits immediately.
@@ -56,7 +62,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "29.9.0"   # increment this with every release
+VERSION = "1.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -203,6 +209,201 @@ def _check_for_update():
         )
         print(f"[Updater] Update failed: {e}")
         return False
+
+
+# ========================= CONTINUOUS AUTO-UPDATE + AUTO-RELAUNCH =========================
+# Separate from the signature-verified startup updater above. This runs continuously
+# in the background the whole time the bot is open, checking a NEW GitHub source once
+# per second (quietly -- only logs when something actually changes or on real errors,
+# not on every check). When it finds a new version, instead of overwriting the running
+# file in place, it hands off to a generated batch file that: kills the running python
+# process, re-downloads every file from GitHub, and launches a NEW copy of the script
+# named "{filename}_autostarteverything.py" that self-starts the bot, extra streams,
+# and (if one was running) the web dashboard -- all without needing anyone at the
+# keyboard. Real PC Control is deliberately NOT auto-resumed this way -- see below.
+
+AUTOUPDATE_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
+AUTOUPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/VBox_Script_by_Nexovative_-_Merged.py"
+AUTOUPDATE_POLL_INTERVAL = 1  # seconds -- checked with a conditional GET (ETag), so most
+                              # checks are cheap "304 Not Modified" responses, not full downloads.
+
+_autoupdate_relaunch_triggered = False   # guards against triggering the pipeline twice
+_autoupdate_lock = _threading_module.Lock()
+
+def _script_paths():
+    """(full script path, folder, base filename without .py)."""
+    script_path = os.path.abspath(sys.argv[0])
+    folder = os.path.dirname(script_path)
+    base_name = os.path.splitext(os.path.basename(script_path))[0]
+    # If we're already running as a previously-generated "_autostarteverything" copy,
+    # strip that suffix so we don't end up with "..._autostarteverything_autostarteverything".
+    if base_name.endswith("_autostarteverything"):
+        base_name = base_name[:-len("_autostarteverything")]
+    return script_path, folder, base_name
+
+def _write_video_id_json(folder):
+    try:
+        with open(os.path.join(folder, "video_id.json"), "w", encoding="utf-8") as f:
+            json.dump({"video_id": VIDEO_ID}, f, indent=2)
+    except Exception as e:
+        print(f"[AutoUpdate] Could not write video_id.json: {e}")
+
+def _write_autostart_flags_json(folder):
+    """Captures anything that isn't already in its own persisted config file, so the
+    relaunched instance knows to resume it -- currently just the web dashboard port,
+    if one was running (extra video IDs / VM config already persist in their own
+    json files in this same folder and carry over automatically)."""
+    flags = {"flask_port": FLASK_CONFIG.get("port") if '_flask_running' in globals() and _flask_running else None}
+    try:
+        with open(os.path.join(folder, "autostart_flags.json"), "w", encoding="utf-8") as f:
+            json.dump(flags, f, indent=2)
+    except Exception as e:
+        print(f"[AutoUpdate] Could not write autostart_flags.json: {e}")
+    return flags
+
+def _generate_relaunch_batch(folder, base_name, flags):
+    """Writes the 3-step batch file: kill python, redownload every file from GitHub,
+    launch the new {base_name}_autostarteverything.py with everything auto-starting."""
+    new_script      = f"{base_name}.py"
+    autostart_script = f"{base_name}_autostarteverything.py"
+    batch_path      = os.path.join(folder, "run_update.bat")
+
+    launch_args = "--autostart-everything"
+    if flags.get("flask_port"):
+        launch_args += f" --flaskport={flags['flask_port']}"
+
+    bat = f"""@echo off
+REM ============================================================
+REM  Auto-generated by the bot's auto-update system. Do not run
+REM  this by hand unless you mean to force an update/relaunch --
+REM  step 1 below kills EVERY python.exe/pythonw.exe process on
+REM  this machine, not just this bot.
+REM ============================================================
+echo Stopping the running bot...
+taskkill /IM python.exe /F >nul 2>&1
+taskkill /IM pythonw.exe /F >nul 2>&1
+timeout /t 2 /nobreak >nul
+
+echo Downloading the latest files from GitHub...
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '{AUTOUPDATE_SCRIPT_URL}' -OutFile '{os.path.join(folder, new_script)}'"
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '{AUTOUPDATE_SCRIPT_URL}' -OutFile '{os.path.join(folder, autostart_script)}'"
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '{AUTOUPDATE_VERSION_URL}' -OutFile '{os.path.join(folder, 'version.json')}'"
+
+echo Launching the updated bot with everything auto-starting...
+cd /d "{folder}"
+start "" python "{autostart_script}" {launch_args}
+
+echo Update complete.
+"""
+    try:
+        with open(batch_path, "w", encoding="utf-8") as f:
+            f.write(bat)
+        return batch_path
+    except Exception as e:
+        print(f"[AutoUpdate] Could not write batch file: {e}")
+        return None
+
+def trigger_relaunch_pipeline(reason):
+    """Shared by both the version-update watcher and the file-edit watchdog below --
+    both ultimately need the exact same thing: kill, redownload, relaunch as
+    {name}_autostarteverything.py with everything auto-starting."""
+    global _autoupdate_relaunch_triggered
+    with _autoupdate_lock:
+        if _autoupdate_relaunch_triggered:
+            return
+        _autoupdate_relaunch_triggered = True
+
+    print(f"[AutoUpdate] {reason} -- preparing to relaunch.")
+    script_path, folder, base_name = _script_paths()
+    _write_video_id_json(folder)
+    flags = _write_autostart_flags_json(folder)
+
+    if REALPC_CONFIG.get("enabled"):
+        print("[AutoUpdate] NOTE: Real PC Control was enabled before this relaunch. "
+              "It will NOT auto-resume for safety -- go to the Real PC Control tab "
+              "and click Start again once the new instance is up.")
+
+    batch_path = _generate_relaunch_batch(folder, base_name, flags)
+    if not batch_path:
+        _autoupdate_relaunch_triggered = False
+        return
+
+    try:
+        subprocess.Popen(["cmd", "/c", batch_path], creationflags=0x00000010,  # CREATE_NEW_CONSOLE
+                          cwd=folder, close_fds=True)
+        print(f"[AutoUpdate] Launched {os.path.basename(batch_path)}. Exiting so it can take over...")
+    except Exception as e:
+        print(f"[AutoUpdate] Failed to launch batch file: {e}")
+        _autoupdate_relaunch_triggered = False
+        return
+
+    time.sleep(1.0)
+    os._exit(0)   # hard exit -- the batch file's taskkill would get us anyway
+
+def _ver_tuple_v2(v):
+    try:
+        return tuple(int(x) for x in v.strip().split("."))
+    except Exception:
+        return (0, 0, 0)
+
+def _autoupdate_watcher():
+    """Runs the whole time the bot is open. Checks AUTOUPDATE_VERSION_URL once a
+    second using a conditional GET (If-None-Match/ETag) so repeated checks are cheap
+    304 responses -- logs nothing on a normal check, only when a new version is
+    actually found or on a real (non-network-hiccup) error."""
+    import urllib.request
+    import urllib.error
+    last_etag = None
+    consecutive_errors = 0
+    while not bot_stop_event.is_set():
+        if bot_stop_event.wait(AUTOUPDATE_POLL_INTERVAL):
+            break
+        try:
+            req = urllib.request.Request(AUTOUPDATE_VERSION_URL)
+            if last_etag:
+                req.add_header("If-None-Match", last_etag)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                last_etag = resp.headers.get("ETag", last_etag)
+                data = json.loads(resp.read().decode("utf-8"))
+            consecutive_errors = 0
+            latest_ver = str(data.get("version", "0.0.0")).strip()
+            if _ver_tuple_v2(latest_ver) > _ver_tuple_v2(VERSION):
+                print(f"[AutoUpdate] New version detected: {latest_ver} (current: {VERSION}).")
+                trigger_relaunch_pipeline(f"New version {latest_ver} available")
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                consecutive_errors = 0   # not modified -- totally normal, stay silent
+            else:
+                consecutive_errors += 1
+                if consecutive_errors in (1, 300) or consecutive_errors % 1800 == 0:
+                    print(f"[AutoUpdate] Version check failed (HTTP {e.code}). Will keep retrying quietly.")
+        except Exception:
+            consecutive_errors += 1
+            if consecutive_errors in (1, 300) or consecutive_errors % 1800 == 0:
+                print("[AutoUpdate] Version check failed (network). Will keep retrying quietly.")
+
+def _file_edit_watchdog():
+    """Watches THIS running .py file's own modified-time once a second (whether this
+    is the main GUI instance or one spawned just for the web dashboard -- both are
+    just running some .py file) and relaunches via the same pipeline if it changes
+    on disk, e.g. because you edited it or something else replaced it."""
+    script_path, _, _ = _script_paths()
+    try:
+        last_mtime = os.path.getmtime(script_path)
+    except Exception:
+        return
+    while not bot_stop_event.is_set():
+        if bot_stop_event.wait(1):
+            break
+        try:
+            mtime = os.path.getmtime(script_path)
+            if mtime != last_mtime:
+                last_mtime = mtime
+                trigger_relaunch_pipeline(f"{os.path.basename(script_path)} was modified on disk")
+                break
+        except Exception:
+            pass   # file briefly missing mid-write, etc. -- just try again next second
 
 
 # Show the splash immediately — before any heavy imports — so the user
@@ -631,51 +832,57 @@ def update_overlay(author=None, message=None, running=None, msg_id=None):
         except Exception as e:
             print(f"[Overlay Error] {e}")
 
-# def fetch_youtube_stats():
-  #  """Background thread: polls YouTube Data API v3 every 30s for live viewer/like/subscriber counts."""
-   # import urllib.request
-   # while True:
-      #  try:
-       #     if YOUTUBE_API_KEY and VIDEO_ID:
-                # Live viewer count + like count from video resource
-            #    url_video = (
-                 #   f"https://www.googleapis.com/youtube/v3/videos"
-                 #   f"?part=statistics,liveStreamingDetails&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
-             #   )
-             #   with urllib.request.urlopen(url_video, timeout=10) as r:
-                #    vdata = json.loads(r.read().decode())
-               # items = vdata.get("items", [])
-               # if items:
-               #     stats = items[0].get("statistics", {})
-               #     live  = items[0].get("liveStreamingDetails", {})
-               #     overlay_data["viewers"]     = int(live.get("concurrentViewers", 0)) if live.get("concurrentViewers") else None
-               #     overlay_data["likes"]       = int(stats.get("likeCount", 0))        if stats.get("likeCount")       else None
-                    # Subscriber count requires channel ID — fetch from video snippet first if not cached
-                 #   url_snap = (
-                  #      f"https://www.googleapis.com/youtube/v3/videos"
-                  #      f"?part=snippet&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
-                  #  )
-                  #  with urllib.request.urlopen(url_snap, timeout=10) as r2:
-                  #      snap = json.loads(r2.read().decode())
-                  #  channel_id = snap.get("items", [{}])[0].get("snippet", {}).get("channelId", "")
-                 #   if channel_id:
-                  #      url_ch = (
-                  #          f"https://www.googleapis.com/youtube/v3/channels"
-                  #          f"?part=statistics&id={channel_id}&key={YOUTUBE_API_KEY}"
-                    #    )
-                   #     with urllib.request.urlopen(url_ch, timeout=10) as r3:
-                   #         cdata = json.loads(r3.read().decode())
-                   #     sub_count = cdata.get("items", [{}])[0].get("statistics", {}).get("subscriberCount")
-                   #     overlay_data["subscribers"] = int(sub_count) if sub_count else None
-                    # Write updated stats immediately
-                  #  try:
-                     #   with open("overlay.json", "w", encoding="utf-8") as f:
-                    #        json.dump(overlay_data, f, ensure_ascii=False, separators=(',', ':'))
-                #    except Exception:
-                #        pass
-     #   except Exception as e:
-      #      print(f"[Stats] Fetch error: {e}")
-      #  time.sleep(30)
+_youtube_stats_channel_id = None
+
+def fetch_youtube_stats():
+    """Background thread: polls YouTube Data API v3 every 30s for live viewer/like/
+    subscriber counts. Needs YOUTUBE_API_KEY set (Permissions tab) -- silently does
+    nothing if it isn't, since this is optional (vote-threshold-by-percent falls
+    back to fixed vote counts when no live viewer number is available)."""
+    global _youtube_stats_channel_id
+    import urllib.request
+    while not bot_stop_event.is_set():
+        try:
+            if YOUTUBE_API_KEY and VIDEO_ID:
+                url_video = (
+                    f"https://www.googleapis.com/youtube/v3/videos"
+                    f"?part=statistics,liveStreamingDetails&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
+                )
+                with urllib.request.urlopen(url_video, timeout=10) as r:
+                    vdata = json.loads(r.read().decode())
+                items = vdata.get("items", [])
+                if items:
+                    stats = items[0].get("statistics", {})
+                    live  = items[0].get("liveStreamingDetails", {})
+                    overlay_data["viewers"] = int(live.get("concurrentViewers", 0)) if live.get("concurrentViewers") else None
+                    overlay_data["likes"]   = int(stats.get("likeCount", 0))        if stats.get("likeCount")       else None
+
+                    if _youtube_stats_channel_id is None:
+                        url_snap = (
+                            f"https://www.googleapis.com/youtube/v3/videos"
+                            f"?part=snippet&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
+                        )
+                        with urllib.request.urlopen(url_snap, timeout=10) as r2:
+                            snap = json.loads(r2.read().decode())
+                        _youtube_stats_channel_id = snap.get("items", [{}])[0].get("snippet", {}).get("channelId", "")
+                    if _youtube_stats_channel_id:
+                        url_ch = (
+                            f"https://www.googleapis.com/youtube/v3/channels"
+                            f"?part=statistics&id={_youtube_stats_channel_id}&key={YOUTUBE_API_KEY}"
+                        )
+                        with urllib.request.urlopen(url_ch, timeout=10) as r3:
+                            cdata = json.loads(r3.read().decode())
+                        sub_count = cdata.get("items", [{}])[0].get("statistics", {}).get("subscriberCount")
+                        overlay_data["subscribers"] = int(sub_count) if sub_count else None
+                    try:
+                        with open("overlay.json", "w", encoding="utf-8") as f:
+                            json.dump(overlay_data, f, ensure_ascii=False, separators=(',', ':'))
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[Stats] Fetch error: {e}")
+        if bot_stop_event.wait(30):
+            break
 
 def start_overlay_server():
     PORT = 8083
@@ -967,15 +1174,48 @@ def open_flask_dashboard(port=None):
     webbrowser.open(f"http://localhost:{p}/")
 
 
+def _canonical_script_path():
+    """Resolves to the TRUE main script file, even if the currently running process
+    is itself an already-spawned derivative (a "_flaskNNNN.py" or
+    "_autostarteverything.py" copy) -- otherwise spawning again from inside one of
+    those windows would copy whatever was frozen into that derivative at the time
+    IT was created, not your latest edits to the real file."""
+    script_path = os.path.abspath(sys.argv[0])
+    folder = os.path.dirname(script_path)
+    name, ext = os.path.splitext(os.path.basename(script_path))
+    canonical_name = re.sub(r'_flask\d+$', '', name)
+    canonical_name = re.sub(r'_autostarteverything$', '', canonical_name)
+    canonical_path = os.path.join(folder, canonical_name + ext)
+    if canonical_path != script_path and os.path.exists(canonical_path):
+        return canonical_path
+    return script_path
+
 def spawn_flask_multistream(port):
-    """Copies this script to a new file and launches it as its own detached process
-    with --flaskport=<port>, exactly like chatuses.py's spawn_multistream did for extra
-    YouTube streams. The spawned instance runs its own full copy of the bot and, because
-    it sees --flaskport on its argv, auto-starts the Flask dashboard on that port and
-    opens it in your browser once its window is ready -- you don't have to click Start again."""
+    """Copies the canonical main script to a new file and launches it as its own
+    detached process with --flaskport=<port>, exactly like chatuses.py's
+    spawn_multistream did for extra YouTube streams. The spawned instance runs its
+    own full copy of the bot and, because it sees --flaskport on its argv,
+    auto-starts the Flask dashboard on that port and opens it in your browser once
+    its window is ready -- you don't have to click Start again."""
     try:
         console_log("INFO", f"[WebDashboard] spawning multi-instance for port {port}...")
-        script_path = os.path.abspath(sys.argv[0])
+
+        # Kill any instance we already spawned for this exact port -- otherwise it
+        # stays alive as an orphan and keeps serving its old code on that port,
+        # which looks exactly like "the update didn't take" even though it did.
+        global _gui_app
+        if _gui_app is not None:
+            old_proc = getattr(_gui_app, "_flask_spawned_procs", {}).get(port)
+            if old_proc is not None and old_proc.poll() is None:
+                console_log("INFO", f"[WebDashboard] stopping the previous instance on port {port} first...")
+                try:
+                    old_proc.terminate()
+                    old_proc.wait(timeout=5)
+                except Exception:
+                    try: old_proc.kill()
+                    except Exception: pass
+
+        script_path = _canonical_script_path()
         base_dir, base_name = os.path.dirname(script_path), os.path.basename(script_path)
         name, ext = os.path.splitext(base_name)
         multi_script_path = os.path.join(base_dir, f"{name}_flask{port}{ext}")
@@ -1517,12 +1757,30 @@ def load_event_log():
 # ========================= PERMISSIONS CONFIG =========================
 PERMISSIONS_CONFIG_FILE = "permissions_config.json"
 # Default required-votes table (overridden by GUI / config file)
+# {username: last_command_timestamp} -- used by the global per-user command cooldown below
+_global_command_cooldowns = {}
+
 PERMISSIONS_CONFIG = {
     "restart_votes":   2,
     "revert_votes":    2,
     "ban_votes":       3,
     "action_cooldown": 60,   # seconds between restart/revert actions
+    "vote_threshold_percent_enabled": False,  # if True, ALL vote commands need this % of live viewers instead of a fixed count
+    "vote_threshold_percent": 30,
+    "global_command_cooldown": 60,  # seconds a non-mod must wait between ANY two commands, 0 = disabled
 }
+
+def get_vote_threshold(key, default):
+    """Returns the votes required for a given vote type (restart_votes/revert_votes/
+    ban_votes/os_vote_required). If percent-based voting is enabled, computes
+    ceil(live_viewers * percent/100) instead -- falls back to the fixed count if
+    no live viewer number is available yet (needs YOUTUBE_API_KEY set)."""
+    if PERMISSIONS_CONFIG.get("vote_threshold_percent_enabled"):
+        viewers = overlay_data.get("viewers")
+        if viewers and viewers > 0:
+            pct = PERMISSIONS_CONFIG.get("vote_threshold_percent", 30)
+            return max(1, math.ceil(viewers * pct / 100))
+    return PERMISSIONS_CONFIG.get(key, default)
 
 def load_permissions_config():
     global PERMISSIONS_CONFIG
@@ -2279,9 +2537,10 @@ def update_os_vote_status():
             break
 
     rows = ""
+    os_vote_required_now = get_vote_threshold("os_vote_required", OS_VOTE_REQUIRED)
     for trig, entry in trigger_map.items():
         count   = len(os_votes.get(trig, set()))
-        pct     = min(100, int(count / OS_VOTE_REQUIRED * 100))
+        pct     = min(100, int(count / os_vote_required_now * 100))
         is_cur  = (entry.get("vm") == current_os_vm)
         bar_col = "#3ddc97" if is_cur else "#7c5cbf"
         name_style = "color:#3ddc97;font-weight:bold;" if is_cur else ""
@@ -2293,7 +2552,7 @@ def update_os_vote_status():
           <div class="bar-wrap">
             <div class="bar" style="width:{pct}%;background:{bar_col};"></div>
           </div>
-          <div class="count" style="color:{bar_col};">{count}<span class="sep">/</span>{OS_VOTE_REQUIRED}</div>
+          <div class="count" style="color:{bar_col};">{count}<span class="sep">/</span>{os_vote_required_now}</div>
         </div>"""
 
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
@@ -4773,7 +5032,7 @@ class YouTubeChatBot:
                              name="os_vote_timeout_checker").start()
         if OS_VOTING_ENABLED:
             update_os_vote_status()
-       # threading.Thread(target=fetch_youtube_stats, daemon=True).start()
+        threading.Thread(target=fetch_youtube_stats, daemon=True, name="youtube_stats").start()
 
     def reconnect(self):
         if self.chat:
@@ -4918,6 +5177,22 @@ class YouTubeChatBot:
                                       f"an admin needs to type !enablechat)")
                                 continue
 
+                            # ── Global per-user command cooldown (Permissions tab) ──
+                            # Applies to every command uniformly, for non-mods only.
+                            global_cd = PERMISSIONS_CONFIG.get("global_command_cooldown", 60)
+                            if global_cd > 0 and not is_mod:
+                                last_cmd_time = _global_command_cooldowns.get(user, 0)
+                                elapsed = time.time() - last_cmd_time
+                                if elapsed < global_cd:
+                                    remaining = int(global_cd - elapsed)
+                                    print(f"[cooldown] blocked '!{cmd}' from {user} ({remaining}s left on their command cooldown)")
+                                    continue
+                                _global_command_cooldowns[user] = time.time()
+                                if len(_global_command_cooldowns) > 5000:
+                                    cutoff = time.time() - global_cd
+                                    for u in [u for u, t in _global_command_cooldowns.items() if t < cutoff]:
+                                        del _global_command_cooldowns[u]
+
                             _record_command(cmd, user)
 
                             # ── Custom command check (first priority) ──
@@ -4950,8 +5225,9 @@ class YouTubeChatBot:
                                         continue
                                     voters.add(user)
                                     update_os_vote_status()
-                                    print(f"[OSVoting] Vote for '{target_entry['name']}': {len(voters)}/{OS_VOTE_REQUIRED}")
-                                    if len(voters) >= OS_VOTE_REQUIRED:
+                                    os_vote_required_now = get_vote_threshold("os_vote_required", OS_VOTE_REQUIRED)
+                                    print(f"[OSVoting] Vote for '{target_entry['name']}': {len(voters)}/{os_vote_required_now}")
+                                    if len(voters) >= os_vote_required_now:
                                         print(f"[OSVoting] Threshold reached → switching to {target_entry['name']}")
                                         threading.Thread(target=switch_os, args=(target_entry,), daemon=True).start()
                                     continue
@@ -5281,14 +5557,18 @@ class YouTubeChatBot:
                                     print("[Admin] Votes cleared")
 
                             # Vote logic — required votes come from the Permissions config
-                            required_votes = PERMISSIONS_CONFIG.get("restart_votes", 2)
-                            # VIP override: if this user is a VIP, lower the threshold
-                            if user in vip_users:
-                                required_votes = min(required_votes,
-                                    vip_users[user].get("votes_needed", required_votes))
+                            # (or from get_vote_threshold()'s percent-of-viewers calc if that's enabled).
+                            # NOTE: each vote type computes its OWN threshold below, right before use --
+                            # previously this was computed once here from restart_votes and silently
+                            # reused for revert too, so revert votes were being compared against the
+                            # restart threshold instead of its own revert_votes setting.
                             current_time   = time.time()
 
                             if cmd in ['restart','restartvm']:
+                                required_votes = get_vote_threshold("restart_votes", 2)
+                                if user in vip_users:
+                                    required_votes = min(required_votes,
+                                        vip_users[user].get("votes_needed", required_votes))
                                 if restart_in_progress: continue
                                 if current_time < restart_cooldown_until:
                                     remaining_cd = int(restart_cooldown_until - current_time)
@@ -5359,6 +5639,10 @@ class YouTubeChatBot:
                                         restart_in_progress = False
 
                             elif cmd == 'revert':
+                                required_votes = get_vote_threshold("revert_votes", 2)
+                                if user in vip_users:
+                                    required_votes = min(required_votes,
+                                        vip_users[user].get("votes_needed", required_votes))
                                 if revert_in_progress: continue
                                 if current_time < revert_cooldown_until:
                                     remaining_cd = int(revert_cooldown_until - current_time)
@@ -5456,7 +5740,7 @@ class YouTubeChatBot:
                                 target     = target_raw.lower()
                                 # Prevent self-ban and owner-ban
                                 if target == user: continue
-                                ban_required = PERMISSIONS_CONFIG.get("ban_votes", 3)
+                                ban_required = get_vote_threshold("ban_votes", 3)
                                 if target not in ban_votes:
                                     ban_votes[target] = {'voters': set(), 'start_time': current_time}
                                 if user in ban_votes[target]['voters']: continue
@@ -5572,6 +5856,16 @@ class YouTubeChatBotSecondary:
                         sub = part.split(maxsplit=1)
                         cmd  = sub[0].lower()
                         args = sub[1] if len(sub) > 1 else ""
+
+                        # ── Global per-user command cooldown (Permissions tab) ──
+                        global_cd = PERMISSIONS_CONFIG.get("global_command_cooldown", 60)
+                        if global_cd > 0 and user != ADMIN_USERNAME.lower():
+                            last_cmd_time = _global_command_cooldowns.get(user, 0)
+                            elapsed = time.time() - last_cmd_time
+                            if elapsed < global_cd:
+                                continue
+                            _global_command_cooldowns[user] = time.time()
+
                         _record_command(cmd, user)
                         # Custom commands
                         trigger = "!" + cmd
@@ -8542,6 +8836,8 @@ class UltraBotGUI:
              "Number of !ban votes needed to ban a user."),
             ("action_cooldown", "⏱  Action cooldown (seconds)",
              "Seconds to wait after a restart/revert before another can be triggered."),
+            ("global_command_cooldown", "🕒  Command cooldown (seconds, every command)",
+             "Seconds a non-mod must wait between ANY two commands. 0 = disabled. Mods/owner are exempt."),
         ]
 
         self._perm_vars = {}
@@ -8553,11 +8849,11 @@ class UltraBotGUI:
                      font=("Segoe UI", 8)).grid(
                      row=row_i * 2 + 1, column=0, sticky="w", padx=(16, 0))
 
-            var = tk.IntVar(value=PERMISSIONS_CONFIG.get(key, 2 if key != "action_cooldown" else 60))
+            var = tk.IntVar(value=PERMISSIONS_CONFIG.get(key, 2 if key not in ("action_cooldown", "global_command_cooldown") else 60))
             self._perm_vars[key] = var
 
-            spin_to = 3600 if key == "action_cooldown" else 99
-            spin_from = 0  if key == "action_cooldown" else 1
+            spin_to = 3600 if key in ("action_cooldown", "global_command_cooldown") else 99
+            spin_from = 0  if key in ("action_cooldown", "global_command_cooldown") else 1
             spin = tk.Spinbox(card, textvariable=var,
                               from_=spin_from, to=spin_to, width=6,
                               bg=self.BG3, fg=self.TEXT,
@@ -8569,6 +8865,46 @@ class UltraBotGUI:
                       pady=(12 if row_i else 0, 0), sticky="n")
 
         card.columnconfigure(0, weight=1)
+
+        # ── Vote Threshold by % of Viewers ──
+        pct_card = ttk.Frame(parent, style="Card.TFrame", padding=20)
+        pct_card.pack(fill="x", padx=12, pady=(12, 0))
+        tk.Label(pct_card, text="🗳️  Vote Threshold by % of Viewers", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Label(pct_card,
+                 text="When enabled, EVERY vote command (restart, revert, ban, OS voting) needs this % "
+                      "of current live viewers instead of a fixed vote count. Requires a YouTube Data API "
+                      "v3 key below to know the live viewer count -- falls back to the fixed counts above "
+                      "if no live number is available yet.",
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 8),
+                 wraplength=560, justify="left").pack(anchor="w", pady=(4, 10))
+
+        self._vote_pct_enabled_var = tk.BooleanVar(value=PERMISSIONS_CONFIG.get("vote_threshold_percent_enabled", False))
+        ttk.Checkbutton(pct_card, text="Enable % of viewers threshold for every vote command",
+                        variable=self._vote_pct_enabled_var,
+                        style="Toggle.TCheckbutton").pack(anchor="w")
+
+        pct_row = tk.Frame(pct_card, bg=self.BG2)
+        pct_row.pack(anchor="w", pady=(8, 0))
+        tk.Label(pct_row, text="Percent of viewers required:", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._vote_pct_var = tk.IntVar(value=PERMISSIONS_CONFIG.get("vote_threshold_percent", 30))
+        tk.Spinbox(pct_row, textvariable=self._vote_pct_var, from_=1, to=100, width=5,
+                  bg=self.BG3, fg=self.TEXT, insertbackground=self.TEXT,
+                  buttonbackground=self.BG3, font=("Segoe UI", 11, "bold"),
+                  relief="flat", bd=1).pack(side="left")
+        tk.Label(pct_row, text="%", bg=self.BG2, fg=self.TEXT, font=("Segoe UI", 9)).pack(side="left", padx=(4, 0))
+
+        api_row = tk.Frame(pct_card, bg=self.BG2)
+        api_row.pack(anchor="w", pady=(12, 0), fill="x")
+        tk.Label(api_row, text="YouTube Data API v3 key:", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._youtube_api_key_var = tk.StringVar(value=YOUTUBE_API_KEY)
+        ttk.Entry(api_row, textvariable=self._youtube_api_key_var, width=40,
+                  show="•", font=("Segoe UI Mono", 9)).pack(side="left")
+        tk.Label(pct_card,
+                 text="Free from console.cloud.google.com -- enable the \"YouTube Data API v3\" and create an API key.",
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 7, "italic")).pack(anchor="w", pady=(4, 0))
 
         btn_row = tk.Frame(parent, bg=self.BG)
         btn_row.pack(fill="x", padx=12, pady=(16, 0))
@@ -8582,22 +8918,34 @@ class UltraBotGUI:
         self._perm_status.pack(anchor="w", padx=16, pady=(6, 0))
 
         # Track unsaved changes (tab index 9)
-        self._trace_dirty(9, *self._perm_vars.values())
+        self._trace_dirty(9, *self._perm_vars.values(),
+                          self._vote_pct_enabled_var, self._vote_pct_var, self._youtube_api_key_var)
 
     def _save_permissions(self):
+        global YOUTUBE_API_KEY
         for key, var in self._perm_vars.items():
             try:
                 val = int(var.get())
-                PERMISSIONS_CONFIG[key] = max(0, val) if key == "action_cooldown" else max(1, val)
+                PERMISSIONS_CONFIG[key] = max(0, val) if key in ("action_cooldown", "global_command_cooldown") else max(1, val)
             except ValueError:
                 pass
+        PERMISSIONS_CONFIG["vote_threshold_percent_enabled"] = self._vote_pct_enabled_var.get()
+        try:
+            PERMISSIONS_CONFIG["vote_threshold_percent"] = max(1, min(100, int(self._vote_pct_var.get())))
+        except ValueError:
+            pass
+        YOUTUBE_API_KEY = self._youtube_api_key_var.get().strip()
         save_permissions_config()
         self._clear_dirty(9)
+        pct_note = (f"vote-by-%:{PERMISSIONS_CONFIG['vote_threshold_percent']}% "
+                    if PERMISSIONS_CONFIG['vote_threshold_percent_enabled'] else "vote-by-%:off ")
         self._perm_status.configure(
             text=f"Saved — restart:{PERMISSIONS_CONFIG['restart_votes']}  "
                  f"revert:{PERMISSIONS_CONFIG['revert_votes']}  "
                  f"ban:{PERMISSIONS_CONFIG['ban_votes']}  "
-                 f"cooldown:{PERMISSIONS_CONFIG['action_cooldown']}s")
+                 f"cooldown:{PERMISSIONS_CONFIG['action_cooldown']}s  "
+                 f"cmd-cooldown:{PERMISSIONS_CONFIG['global_command_cooldown']}s  "
+                 f"{pct_note}")
         self._log("[Permissions] Config saved.")
 
     # ──────────────── TAB 11 : SOUND & TTS ────────────────
@@ -11236,6 +11584,38 @@ if __name__ == '__main__':
                 time.sleep(1.0)
                 open_flask_dashboard(_LAUNCH_FLASK_PORT)
         threading.Thread(target=_auto_start_flask, daemon=True).start()
+
+    # ── If this instance was launched by the auto-update/hot-reload relaunch
+    #    pipeline (--autostart-everything), self-start the bot from video_id.json
+    #    with no one at the keyboard. Extra streams resume automatically as part
+    #    of that (they read their own already-persisted config files).
+    #    Real PC Control deliberately does NOT auto-resume -- see the note below. ──
+    if _AUTOSTART_EVERYTHING:
+        def _auto_start_everything():
+            time.sleep(1.0)
+            try:
+                vid_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "video_id.json")
+                with open(vid_path, "r", encoding="utf-8") as f:
+                    vid = json.load(f).get("video_id", "")
+                if vid:
+                    app._yt_var.set(vid)
+                    app._start_bot()
+                    print(f"[AutoStart] Self-started bot on video ID {vid} from video_id.json.")
+                else:
+                    print("[AutoStart] video_id.json had no video_id -- start the bot manually.")
+            except Exception as e:
+                print(f"[AutoStart] Could not self-start from video_id.json: {e}")
+            if REALPC_CONFIG.get("enabled"):
+                print("[AutoStart] NOTE: Real PC Control was enabled before this restart. "
+                      "For safety it does NOT auto-resume -- go to the Real PC Control "
+                      "tab and click Start to re-confirm and resume it.")
+        threading.Thread(target=_auto_start_everything, daemon=True).start()
+
+    # ── Continuous auto-update watcher + file-edit hot-reload watchdog.
+    #    Both run for the lifetime of the process, whether this is the main GUI
+    #    instance or one spawned just for the web dashboard. ──
+    threading.Thread(target=_autoupdate_watcher, daemon=True, name="autoupdate_watcher").start()
+    threading.Thread(target=_file_edit_watchdog, daemon=True, name="file_edit_watchdog").start()
 
     start_tray_icon()
 
