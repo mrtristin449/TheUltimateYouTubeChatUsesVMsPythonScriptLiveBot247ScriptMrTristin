@@ -64,11 +64,31 @@ if not _is_admin():
 # ========================= VERSION & AUTO-UPDATE =========================
 VERSION = "1.0"   # increment this with every release
 
+# This script's own filename -- used to make sure a shared/misconfigured version.json
+# is actually meant for THIS file before ever applying an update. A single version.json
+# with one sha256/signature pair can only ever be valid for ONE file's actual content --
+# if the repo hosts multiple platform/backend variants (like this one does), each variant
+# needs its OWN version.json with a "filename" field matching this constant, or this
+# script has no way to tell "a new version exists" apart from "a DIFFERENT file's new
+# version exists, and applying it here would silently corrupt this install."
+# If version.json has no "filename" field at all, this check is skipped (so this still
+# works with a simple single-file repo) -- but IS enforced the moment that field appears.
+CURRENT_FILENAME = "YouTubeChatUsesVM-Windows-VBox.py"
+
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
-# GITHUB_SCRIPT_URL   → raw URL of the main script file in your repo
+# GITHUB_SCRIPT_URL   → raw URL of THIS file (YouTubeChatUsesVM-Windows-VBox.py) in your repo
+#   Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Windows-VBox.py
+#   (urllib needs the RAW content URL below, not the browsable page above --
+#   raw.githubusercontent.com serves the actual file bytes, github.com/.../blob/
+#   serves an HTML viewer page that urlopen() can't parse as source code.)
+#
+# Other Windows variants in this repo (for reference only -- deliberately NOT fetched or
+# checked by this script, only its OWN file above is ever downloaded/verified/replaced):
+#   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Windows-VMware.py
+#   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Windows-VBoxAndVMware.py
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
-GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/VBox_Script_by_Nexovative_-_Merged.py"
+GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Windows-VBox.py"
 
 # Public key used to verify the signature of downloaded updates.
 # This is SAFE to keep here — it can only verify signatures, not create them.
@@ -133,9 +153,22 @@ def _check_for_update():
             latest_ver      = data.get("version", "0.0.0").strip()
             expected_sha256 = data.get("sha256", "").strip()
             signature_hex   = data.get("signature", "").strip()
+            version_filename = str(data.get("filename", "")).strip()
     except Exception as e:
         # Network unavailable or repo not configured — silently skip.
         print(f"[Updater] Could not check for updates: {e}")
+        return False
+
+    if version_filename and version_filename != CURRENT_FILENAME:
+        # version.json is declaring itself as meant for a DIFFERENT file in this repo
+        # (a different platform/backend variant) -- this is exactly the "shared
+        # version.json breaks multi-variant repos" scenario. Refuse rather than risk
+        # applying a mismatched update: staying on the current version is always safer
+        # than silently overwriting this file with a different variant's content.
+        print(f"[Updater] version.json is for '{version_filename}', not this file "
+              f"('{CURRENT_FILENAME}') -- skipping update. This is expected if you just "
+              f"updated a DIFFERENT variant's version.json and haven't gotten to this "
+              f"one yet.")
         return False
 
     def _ver_tuple(v):
@@ -222,8 +255,9 @@ def _check_for_update():
 # and (if one was running) the web dashboard -- all without needing anyone at the
 # keyboard. Real PC Control is deliberately NOT auto-resumed this way -- see below.
 
+# Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Windows-VBox.py
 AUTOUPDATE_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
-AUTOUPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/VBox_Script_by_Nexovative_-_Merged.py"
+AUTOUPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Windows-VBox.py"
 AUTOUPDATE_POLL_INTERVAL = 1  # seconds -- checked with a conditional GET (ETag), so most
                               # checks are cheap "304 Not Modified" responses, not full downloads.
 
@@ -270,6 +304,13 @@ def _download_and_verify_update(version_data):
     downloads unverified with a clear warning, so the pipeline stays usable while
     you're still setting up signing, but that gap is loud, not silent."""
     import urllib.request
+    version_filename = str(version_data.get("filename", "")).strip()
+    if version_filename and version_filename != CURRENT_FILENAME:
+        print(f"[AutoUpdate] SECURITY: version_data is for '{version_filename}', not this "
+              f"file ('{CURRENT_FILENAME}') -- refusing to download/apply. This should "
+              f"have been caught before this function was ever called; if you're seeing "
+              f"this, something upstream isn't checking version.json's filename first.")
+        return None
     expected_sha256 = str(version_data.get("sha256", "")).strip()
     signature_hex   = str(version_data.get("signature", "")).strip()
     try:
@@ -461,6 +502,12 @@ def _autoupdate_watcher():
                 last_etag = resp.headers.get("ETag", last_etag)
                 data = json.loads(resp.read().decode("utf-8"))
             consecutive_errors = 0
+            version_filename = str(data.get("filename", "")).strip()
+            if version_filename and version_filename != CURRENT_FILENAME:
+                # Same "shared version.json across multiple variants" safety check as
+                # _check_for_update() -- if it's declared for a different file, this
+                # isn't a real update for THIS script, so don't act on it.
+                continue
             latest_ver = str(data.get("version", "0.0.0")).strip()
             if _ver_tuple_v2(latest_ver) > _ver_tuple_v2(VERSION):
                 print(f"[AutoUpdate] New version detected: {latest_ver} (current: {VERSION}).")
