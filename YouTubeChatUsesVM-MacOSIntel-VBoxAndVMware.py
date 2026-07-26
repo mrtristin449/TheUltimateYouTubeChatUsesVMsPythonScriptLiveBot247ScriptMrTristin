@@ -29,6 +29,722 @@ sys.stderr = _StderrFilter(sys.stderr)
 try: import pythoncom
 except ImportError: pass
 
+# ── Detect "--autostart-everything" (set by the auto-update/hot-reload relaunch
+#    pipeline's generated batch/shell file on the freshly downloaded
+#    *_autostarteverything.py copy) -- tells this instance to read video_id.json and
+#    self-start the bot without anyone at the keyboard. ──
+_AUTOSTART_EVERYTHING = "--autostart-everything" in sys.argv[1:]
+
+def _native_dialog_yesno(msg, title):
+    """Shows a native Yes/No dialog WITHOUT needing tkinter initialized yet (used during
+    the UAC-elevation and update-check flows, both of which run before the GUI exists).
+    Returns True for Yes, False for No -- or True if the dialog couldn't be shown at all,
+    since defaulting to "proceed" is safer than silently blocking startup forever."""
+    if platform.system() == "Windows":
+        import ctypes
+        MB_YESNO, MB_ICONQUESTION, IDYES = 0x04, 0x20, 6
+        try:
+            return ctypes.windll.user32.MessageBoxW(0, msg, title, MB_YESNO | MB_ICONQUESTION) == IDYES
+        except Exception:
+            return True
+    elif platform.system() == "Darwin":
+        try:
+            esc_msg = msg.replace('\\', '\\\\').replace('"', '\\"')
+            esc_title = title.replace('\\', '\\\\').replace('"', '\\"')
+            script = f'display dialog "{esc_msg}" with title "{esc_title}" buttons {{"No", "Yes"}} default button "Yes"'
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+            return "button returned:Yes" in (result.stdout or "")
+        except Exception:
+            return True
+    else:
+        print(f"[{title}] {msg}")
+        return True
+
+def _native_dialog_error(msg, title):
+    """Shows a native error/info dialog WITHOUT needing tkinter initialized yet."""
+    if platform.system() == "Windows":
+        import ctypes
+        MB_ICONERROR = 0x10
+        try:
+            ctypes.windll.user32.MessageBoxW(0, msg, title, MB_ICONERROR)
+        except Exception:
+            pass
+    elif platform.system() == "Darwin":
+        try:
+            esc_msg = msg.replace('\\', '\\\\').replace('"', '\\"')
+            esc_title = title.replace('\\', '\\\\').replace('"', '\\"')
+            script = f'display alert "{esc_title}" message "{esc_msg}"'
+            subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+        except Exception:
+            pass
+    else:
+        print(f"[{title}] {msg}")
+
+# ========================= VERSION & AUTO-UPDATE =========================
+# This script's own filename -- used to make sure a shared/misconfigured version.json
+# is actually meant for THIS file before ever applying an update. A single version.json
+# with one sha256/signature pair can only ever be valid for ONE file's actual content --
+# if the repo hosts multiple platform/backend variants (like this one does), each variant
+# needs its OWN version.json with a "filename" field matching this constant, or this
+# script has no way to tell "a new version exists" apart from "a DIFFERENT file's new
+# version exists, and applying it here would silently corrupt this install."
+# If version.json has no "filename" field at all, this check is skipped (so this still
+# works with a simple single-file repo) -- but IS enforced the moment that field appears.
+CURRENT_FILENAME = "YouTubeChatUsesVM-MacOSIntel-VBoxAndVMware.py"
+
+# Replace these two URLs with your own GitHub repo paths.
+# GITHUB_VERSION_URL  → raw URL of version.json in your repo
+# GITHUB_SCRIPT_URL   → raw URL of THIS file (YouTubeChatUsesVM-MacOSIntel-VBoxAndVMware.py) in your repo
+#   Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-MacOSIntel-VBoxAndVMware.py
+#   (urllib needs the RAW content URL below, not the browsable page above --
+#   raw.githubusercontent.com serves the actual file bytes, github.com/.../blob/
+#   serves an HTML viewer page that urlopen() can't parse as source code.)
+#
+# Other macOS Intel variants in this repo (for reference only -- deliberately NOT fetched
+# or checked by this script, only its OWN file above is ever downloaded/verified/replaced):
+#   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-MacOSIntel-VBox.py
+#   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-MacOSIntel-VMware.py
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
+GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-MacOSIntel-VBoxAndVMware.py"
+
+# Public key used to verify the signature of downloaded updates.
+# This is SAFE to keep here — it can only verify signatures, not create them.
+# Generate this pair locally with generate_keys.py and paste the public key below.
+UPDATE_PUBLIC_KEY_HEX = "13eebf036b59fe64547d23cd2e3e23fae1d5ee086e912939a91d5535ed4df08b"
+
+
+def _verify_update_signature(file_bytes, expected_sha256_hex, signature_hex):
+    """
+    Verifies that file_bytes matches the expected SHA-256 hash, and that the
+    hash was signed by the holder of the private key matching
+    UPDATE_PUBLIC_KEY_HEX. Returns True only if both checks pass.
+    """
+    import hashlib
+    import binascii
+
+    try:
+        from nacl.signing import VerifyKey
+        from nacl.exceptions import BadSignatureError
+    except ImportError:
+        print("[Updater] PyNaCl is not installed; cannot verify update signature. Aborting update.")
+        return False
+
+    actual_hash = hashlib.sha256(file_bytes).hexdigest()
+    if actual_hash != expected_sha256_hex:
+        print("[Updater] Hash mismatch -- downloaded file does not match version.json. Rejecting update.")
+        return False
+
+    try:
+        verify_key = VerifyKey(binascii.unhexlify(UPDATE_PUBLIC_KEY_HEX))
+        verify_key.verify(expected_sha256_hex.encode("ascii"), binascii.unhexlify(signature_hex))
+        return True
+    except BadSignatureError:
+        print("[Updater] Signature is invalid. Rejecting update.")
+        return False
+    except Exception as e:
+        print(f"[Updater] Signature verification error: {e}. Rejecting update.")
+        return False
+
+
+def _check_for_update():
+    """
+    Downloads version.json from GitHub and compares it to the running version.
+    If a newer version is available, asks the user whether to update.
+    Called once during splash, before the main GUI is built.
+    Returns True if the script restarted (caller should exit), False otherwise.
+    """
+    import urllib.request
+    import urllib.error
+    import json as _json
+
+    try:
+        _update_splash(8, "Checking for updates...")
+        with urllib.request.urlopen(GITHUB_VERSION_URL, timeout=5) as resp:
+            data            = _json.loads(resp.read().decode("utf-8"))
+            latest_ver      = data.get("version", "0.0.0").strip()
+            expected_sha256 = data.get("sha256", "").strip()
+            signature_hex   = data.get("signature", "").strip()
+            version_filename = str(data.get("filename", "")).strip()
+    except Exception as e:
+        # Network unavailable or repo not configured — silently skip.
+        print(f"[Updater] Could not check for updates: {e}")
+        return False
+
+    if version_filename and version_filename != CURRENT_FILENAME:
+        # version.json is declaring itself as meant for a DIFFERENT file in this repo
+        # (a different platform/backend variant) -- this is exactly the "shared
+        # version.json breaks multi-variant repos" scenario. Refuse rather than risk
+        # applying a mismatched update: staying on the current version is always safer
+        # than silently overwriting this file with a different variant's content.
+        print(f"[Updater] version.json is for '{version_filename}', not this file "
+              f"('{CURRENT_FILENAME}') -- skipping update. This is expected if you just "
+              f"updated a DIFFERENT variant's version.json and haven't gotten to this "
+              f"one yet.")
+        return False
+
+    def _ver_tuple(v):
+        try:
+            return tuple(int(x) for x in v.strip().split("."))
+        except Exception:
+            return (0, 0, 0)
+
+    if _ver_tuple(latest_ver) <= _ver_tuple(VERSION):
+        print(f"[Updater] Up to date ({VERSION}).")
+        return False
+
+    if not expected_sha256 or not signature_hex:
+        print("[Updater] version.json is missing sha256/signature fields. Refusing to update.")
+        return False
+
+    # New version found — ask the user.
+    msg = (
+        f"A new version is available!\n\n"
+        f"  Current version : {VERSION}\n"
+        f"  New version     : {latest_ver}\n\n"
+        f"Update now? The bot will restart automatically after downloading."
+    )
+    if not _native_dialog_yesno(msg, "Update Available"):
+        print(f"[Updater] User declined update to {latest_ver}.")
+        return False
+
+    # Download new script to a temporary file first (atomic update).
+    _update_splash(9, f"Downloading version {latest_ver}...")
+    script_path = os.path.abspath(sys.argv[0])
+    tmp_path    = script_path + ".update_tmp"
+    try:
+        with urllib.request.urlopen(GITHUB_SCRIPT_URL, timeout=30) as resp:
+            new_code = resp.read()
+
+        _update_splash(9, "Verifying update signature...")
+        if not _verify_update_signature(new_code, expected_sha256, signature_hex):
+            _native_dialog_error(
+                "Update rejected: the downloaded file failed signature verification.\n\n"
+                "This could mean the update source has been compromised.\n"
+                "The bot will start with the current version.",
+                "Update Security Warning"
+            )
+            print("[Updater] Update rejected due to failed signature verification.")
+            return False
+
+        with open(tmp_path, "wb") as f:
+            f.write(new_code)
+        # Atomic replace: rename tmp over the live file.
+        if os.path.exists(script_path):
+            os.replace(tmp_path, script_path)
+        print(f"[Updater] Updated to {latest_ver}. Restarting...")
+        # Restart the process with the same arguments.
+        subprocess.Popen([sys.executable, script_path] + sys.argv[1:])
+        sys.exit(0)
+    except Exception as e:
+        # Clean up temp file if something went wrong.
+        if os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except Exception: pass
+        _native_dialog_error(
+            f"Update failed:\n{e}\n\nThe bot will start with the current version.",
+            "Update Error"
+        )
+        print(f"[Updater] Update failed: {e}")
+        return False
+
+
+# ========================= CONTINUOUS AUTO-UPDATE + AUTO-RELAUNCH =========================
+# Separate from the signature-verified startup updater above. This runs continuously
+# in the background the whole time the bot is open, checking a NEW GitHub source once
+# per second (quietly -- only logs when something actually changes or on real errors,
+# not on every check). When it finds a new version, instead of overwriting the running
+# file in place, it hands off to a generated batch file that: kills the running python
+# process, re-downloads every file from GitHub, and launches a NEW copy of the script
+# named "{filename}_autostarteverything.py" that self-starts the bot, extra streams,
+# and (if one was running) the web dashboard -- all without needing anyone at the
+# keyboard. Real PC Control is deliberately NOT auto-resumed this way -- see below.
+
+# Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-MacOSIntel-VBoxAndVMware.py
+AUTOUPDATE_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
+AUTOUPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-MacOSIntel-VBoxAndVMware.py"
+AUTOUPDATE_POLL_INTERVAL = 1  # seconds -- checked with a conditional GET (ETag), so most
+                              # checks are cheap "304 Not Modified" responses, not full downloads.
+
+_autoupdate_relaunch_triggered = False   # guards against triggering the pipeline twice
+_autoupdate_lock = _threading_module.Lock()
+
+def _script_paths():
+    """(full script path, folder, base filename without .py)."""
+    script_path = os.path.abspath(sys.argv[0])
+    folder = os.path.dirname(script_path)
+    base_name = os.path.splitext(os.path.basename(script_path))[0]
+    # If we're already running as a previously-generated "_autostarteverything" copy,
+    # strip that suffix so we don't end up with "..._autostarteverything_autostarteverything".
+    if base_name.endswith("_autostarteverything"):
+        base_name = base_name[:-len("_autostarteverything")]
+    return script_path, folder, base_name
+
+def _write_video_id_json(folder):
+    try:
+        active_url = app_instance.active_url if app_instance is not None else ""
+        with open(os.path.join(folder, "video_id.json"), "w", encoding="utf-8") as f:
+            json.dump({"video_id": active_url}, f, indent=2)
+    except Exception as e:
+        print(f"[AutoUpdate] Could not write video_id.json: {e}")
+
+def _write_autostart_flags_json(folder):
+    """Captures anything that isn't already in its own persisted config file, so the
+    relaunched instance knows to resume it -- currently just the web dashboard port,
+    if one was running (extra video IDs / VM config already persist in their own
+    json files in this same folder and carry over automatically)."""
+    flask_running = (app_instance is not None and hasattr(app_instance, "flask_thread")
+                     and app_instance.flask_thread is not None and app_instance.flask_thread.is_alive())
+    flags = {"flask_port": flask_port if flask_running else None}
+    try:
+        with open(os.path.join(folder, "autostart_flags.json"), "w", encoding="utf-8") as f:
+            json.dump(flags, f, indent=2)
+    except Exception as e:
+        print(f"[AutoUpdate] Could not write autostart_flags.json: {e}")
+    return flags
+
+def _download_and_verify_update(version_data):
+    """Downloads the new script and verifies it against version.json's sha256+signature
+    using the exact same Ed25519 verification the safe startup updater uses (same
+    UPDATE_PUBLIC_KEY_HEX). Returns the verified bytes on success. Returns None (with
+    a clear log explaining why) if verification fails -- the caller must NOT proceed
+    with the update in that case. If version.json has no sha256/signature at all, this
+    downloads unverified with a clear warning, so the pipeline stays usable while
+    you're still setting up signing, but that gap is loud, not silent."""
+    import urllib.request
+    version_filename = str(version_data.get("filename", "")).strip()
+    if version_filename and version_filename != CURRENT_FILENAME:
+        print(f"[AutoUpdate] SECURITY: version_data is for '{version_filename}', not this "
+              f"file ('{CURRENT_FILENAME}') -- refusing to download/apply. This should "
+              f"have been caught before this function was ever called; if you're seeing "
+              f"this, something upstream isn't checking version.json's filename first.")
+        return None
+    expected_sha256 = str(version_data.get("sha256", "")).strip()
+    signature_hex   = str(version_data.get("signature", "")).strip()
+    try:
+        with urllib.request.urlopen(AUTOUPDATE_SCRIPT_URL, timeout=30) as resp:
+            new_code = resp.read()
+    except Exception as e:
+        print(f"[AutoUpdate] Download failed: {e}")
+        return None
+
+    if not expected_sha256 or not signature_hex:
+        print("[AutoUpdate] WARNING: version.json has no sha256/signature -- installing "
+              "UNVERIFIED. Add both fields (signed with the key matching "
+              "UPDATE_PUBLIC_KEY_HEX) to get real update verification.")
+        return new_code
+
+    if not _verify_update_signature(new_code, expected_sha256, signature_hex):
+        print("[AutoUpdate] SECURITY: the downloaded update failed signature verification "
+              "-- staying on the current version. This means either version.json's "
+              "sha256/signature don't match the file at AUTOUPDATE_SCRIPT_URL, or they "
+              "weren't signed with the private key matching this script's "
+              "UPDATE_PUBLIC_KEY_HEX. Re-sign the release, or update UPDATE_PUBLIC_KEY_HEX "
+              "to your own key pair's public key if this repo uses a different one.")
+        return None
+
+    print("[AutoUpdate] Update signature verified OK.")
+    return new_code
+
+def _generate_relaunch_script_macos(folder, base_name, flags):
+    """macOS equivalent of _generate_relaunch_batch() below -- same steps (stop the
+    running bot, refresh version.json for the record, launch the new instance with
+    everything auto-starting), just in shell instead of batch. Uses curl (built into
+    macOS, no PowerShell equivalent needed) instead of Invoke-WebRequest, and pkill
+    instead of taskkill."""
+    autostart_script = f"{base_name}_autostarteverything.py"
+    autostart_path   = os.path.join(folder, autostart_script)
+    script_path      = os.path.join(folder, "run_update.sh")
+    python_exe       = sys.executable
+
+    launch_args = "--autostart-everything"
+    if flags.get("flask_port"):
+        launch_args += f" --flaskport={flags['flask_port']}"
+
+    sh = f"""#!/bin/bash
+# ============================================================
+# Auto-generated by the bot's auto-update system. Do not run
+# this by hand unless you mean to force an update/relaunch --
+# step 1 below kills EVERY python/python3 process owned by you
+# on this machine, not just this bot. The updated script itself
+# was already downloaded and signature-verified by Python
+# before this script was written -- this just re-fetches
+# version.json for the record and launches the new instance.
+# ============================================================
+echo "Stopping the running bot..."
+pkill -9 -u "$(whoami)" -f "python3?( |$)" 2>/dev/null
+sleep 2
+
+echo "Refreshing version.json..."
+curl -fsSL "{AUTOUPDATE_VERSION_URL}" -o "{os.path.join(folder, 'version.json')}" || \\
+    echo "WARNING: could not refresh version.json (non-fatal, continuing)"
+
+if [ ! -f "{autostart_path}" ]; then
+    echo "============================================================"
+    echo "ERROR: \\"{autostart_script}\\" is missing -- nothing to launch."
+    echo "This should have been written by the bot before this script"
+    echo "ran. Nothing was started."
+    echo "============================================================"
+    read -p "Press Enter to close..."
+    exit 1
+fi
+
+echo "Launching the updated bot with everything auto-starting..."
+echo "Using interpreter: {python_exe}"
+cd "{folder}"
+"{python_exe}" "{autostart_script}" {launch_args}
+if [ $? -ne 0 ]; then
+    echo "============================================================"
+    echo "ERROR: the relaunch exited with an error."
+    echo "Common causes: a missing pip package, or \\"{python_exe}\\""
+    echo "no longer being a valid Python install on this machine."
+    echo "============================================================"
+    read -p "Press Enter to close..."
+    exit 1
+fi
+
+echo "Update complete."
+"""
+    try:
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(sh)
+        os.chmod(script_path, 0o755)
+        return script_path
+    except Exception as e:
+        print(f"[AutoUpdate] Could not write relaunch script: {e}")
+        return None
+
+def _generate_relaunch_batch(folder, base_name, flags):
+    """Writes the batch file: kill python, fetch a fresh version.json (for the record --
+    the actual script content was already downloaded and signature-verified by Python
+    before this was even called, and is written straight to disk, not re-fetched here
+    unverified), then launch the new {base_name}_autostarteverything.py with everything
+    auto-starting.
+
+    Uses sys.executable (the exact interpreter this process is actually running under)
+    rather than a bare "python" -- a bare "python" on PATH can silently resolve to a
+    different install than the one with all this bot's pip packages, or not exist on
+    PATH at all, which looks exactly like "the bot never comes back" with no visible
+    error, since the console window closes before anyone can read it."""
+    autostart_script = f"{base_name}_autostarteverything.py"
+    autostart_path   = os.path.join(folder, autostart_script)
+    batch_path       = os.path.join(folder, "run_update.bat")
+    python_exe       = sys.executable
+
+    launch_args = "--autostart-everything"
+    if flags.get("flask_port"):
+        launch_args += f" --flaskport={flags['flask_port']}"
+
+    bat = f"""@echo off
+REM ============================================================
+REM  Auto-generated by the bot's auto-update system. Do not run
+REM  this by hand unless you mean to force an update/relaunch --
+REM  step 1 below kills EVERY python.exe/pythonw.exe process on
+REM  this machine, not just this bot. The updated script itself
+REM  was already downloaded and signature-verified by Python
+REM  before this batch file was written -- this just re-fetches
+REM  version.json for the record and launches the new instance.
+REM ============================================================
+echo Stopping the running bot...
+taskkill /IM python.exe /F >nul 2>&1
+taskkill /IM pythonw.exe /F >nul 2>&1
+timeout /t 2 /nobreak >nul
+
+echo Refreshing version.json...
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '{AUTOUPDATE_VERSION_URL}' -OutFile '{os.path.join(folder, 'version.json')}'"
+
+if not exist "{autostart_path}" (
+    echo ============================================================
+    echo ERROR: "{autostart_script}" is missing -- nothing to launch.
+    echo This should have been written by the bot before this batch
+    echo file ran. Nothing was started.
+    echo ============================================================
+    pause
+    exit /b 1
+)
+
+echo Launching the updated bot with everything auto-starting...
+echo Using interpreter: "{python_exe}"
+cd /d "{folder}"
+"{python_exe}" "{autostart_script}" {launch_args}
+if errorlevel 1 (
+    echo ============================================================
+    echo ERROR: the relaunch exited with an error ^(code %errorlevel%^).
+    echo Common causes: a missing pip package, or "{python_exe}"
+    echo no longer being a valid Python install on this machine.
+    echo ============================================================
+    pause
+    exit /b 1
+)
+
+echo Update complete.
+"""
+    try:
+        with open(batch_path, "w", encoding="utf-8") as f:
+            f.write(bat)
+        return batch_path
+    except Exception as e:
+        print(f"[AutoUpdate] Could not write batch file: {e}")
+        return None
+
+def trigger_relaunch_pipeline(reason, version_data=None):
+    """Shared by both the version-update watcher and the file-edit watchdog below.
+    If version_data is given (came from a real version.json check), the new script
+    is downloaded and signature-verified FIRST -- the pipeline aborts cleanly if
+    that fails, instead of installing something that didn't check out. If
+    version_data is None (a local file-edit trigger, nothing remote to verify
+    against), it skips straight to relaunching."""
+    global _autoupdate_relaunch_triggered
+    with _autoupdate_lock:
+        if _autoupdate_relaunch_triggered:
+            return
+        _autoupdate_relaunch_triggered = True
+
+    print(f"[AutoUpdate] {reason} -- preparing to relaunch.")
+    script_path, folder, base_name = _script_paths()
+
+    if version_data is not None:
+        verified_code = _download_and_verify_update(version_data)
+        if verified_code is None:
+            _autoupdate_relaunch_triggered = False
+            return
+        try:
+            with open(os.path.join(folder, f"{base_name}.py"), "wb") as f:
+                f.write(verified_code)
+            with open(os.path.join(folder, f"{base_name}_autostarteverything.py"), "wb") as f:
+                f.write(verified_code)
+        except Exception as e:
+            print(f"[AutoUpdate] Could not write verified update to disk: {e}")
+            _autoupdate_relaunch_triggered = False
+            return
+    else:
+        # Local file-edit trigger, not a version update -- nothing remote to verify,
+        # just carry the just-edited file's content over to the autostart copy.
+        try:
+            shutil.copyfile(script_path, os.path.join(folder, f"{base_name}_autostarteverything.py"))
+        except Exception as e:
+            print(f"[AutoUpdate] Could not copy edited file: {e}")
+            _autoupdate_relaunch_triggered = False
+            return
+
+    _write_video_id_json(folder)
+    flags = _write_autostart_flags_json(folder)
+
+    if realpc_config.get("enabled"):
+        print("[AutoUpdate] NOTE: Real PC Control was enabled before this relaunch. "
+              "It will NOT auto-resume for safety -- go to the Real PC Control tab "
+              "and click Start again once the new instance is up.")
+
+    if platform.system() == "Darwin":
+        script_path = _generate_relaunch_script_macos(folder, base_name, flags)
+        if not script_path:
+            _autoupdate_relaunch_triggered = False
+            return
+        try:
+            # osascript + Terminal.app is the macOS equivalent of Windows'
+            # CREATE_NEW_CONSOLE -- subprocess.Popen alone would run the script hidden
+            # in the background, with no visible window to see progress or errors in.
+            osa = f'tell application "Terminal" to do script "\\"{script_path}\\""'
+            subprocess.Popen(["osascript", "-e", osa], close_fds=True)
+            print(f"[AutoUpdate] Launched {os.path.basename(script_path)} in a new Terminal window. Exiting so it can take over...")
+        except Exception as e:
+            print(f"[AutoUpdate] Failed to launch relaunch script: {e}")
+            _autoupdate_relaunch_triggered = False
+            return
+        time.sleep(1.0)
+        os._exit(0)
+        return
+
+    batch_path = _generate_relaunch_batch(folder, base_name, flags)
+    if not batch_path:
+        _autoupdate_relaunch_triggered = False
+        return
+
+    try:
+        subprocess.Popen(["cmd", "/c", batch_path], creationflags=0x00000010,  # CREATE_NEW_CONSOLE
+                          cwd=folder, close_fds=True)
+        print(f"[AutoUpdate] Launched {os.path.basename(batch_path)}. Exiting so it can take over...")
+    except Exception as e:
+        print(f"[AutoUpdate] Failed to launch batch file: {e}")
+        _autoupdate_relaunch_triggered = False
+        return
+
+    time.sleep(1.0)
+    os._exit(0)   # hard exit -- the batch file's taskkill would get us anyway
+
+def _ver_tuple_v2(v):
+    try:
+        return tuple(int(x) for x in v.strip().split("."))
+    except Exception:
+        return (0, 0, 0)
+
+def _autoupdate_watcher():
+    """Runs the whole time the bot is open. Checks AUTOUPDATE_VERSION_URL once a
+    second using a conditional GET (If-None-Match/ETag) so repeated checks are cheap
+    304 responses -- logs nothing on a normal check, only when a new version is
+    actually found or on a real (non-network-hiccup) error."""
+    import urllib.request
+    import urllib.error
+    last_etag = None
+    consecutive_errors = 0
+    while app_instance is None or app_instance.running:
+        time.sleep(AUTOUPDATE_POLL_INTERVAL)
+        if app_instance is not None and not app_instance.running:
+            break
+        try:
+            req = urllib.request.Request(AUTOUPDATE_VERSION_URL)
+            if last_etag:
+                req.add_header("If-None-Match", last_etag)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                last_etag = resp.headers.get("ETag", last_etag)
+                data = json.loads(resp.read().decode("utf-8"))
+            consecutive_errors = 0
+            version_filename = str(data.get("filename", "")).strip()
+            if version_filename and version_filename != CURRENT_FILENAME:
+                # Same "shared version.json across multiple variants" safety check as
+                # _check_for_update() -- if it's declared for a different file, this
+                # isn't a real update for THIS script, so don't act on it.
+                continue
+            latest_ver = str(data.get("version", "0.0.0")).strip()
+            if _ver_tuple_v2(latest_ver) > _ver_tuple_v2(VERSION):
+                print(f"[AutoUpdate] New version detected: {latest_ver} (current: {VERSION}).")
+                trigger_relaunch_pipeline(f"New version {latest_ver} available", version_data=data)
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                consecutive_errors = 0   # not modified -- totally normal, stay silent
+            else:
+                consecutive_errors += 1
+                if consecutive_errors in (1, 300) or consecutive_errors % 1800 == 0:
+                    print(f"[AutoUpdate] Version check failed (HTTP {e.code}). Will keep retrying quietly.")
+        except Exception:
+            consecutive_errors += 1
+            if consecutive_errors in (1, 300) or consecutive_errors % 1800 == 0:
+                print("[AutoUpdate] Version check failed (network). Will keep retrying quietly.")
+
+def _file_edit_watchdog():
+    """Watches THIS running .py file's own modified-time once a second (whether this
+    is the main GUI instance or one spawned just for the web dashboard -- both are
+    just running some .py file) and relaunches via the same pipeline if it changes
+    on disk, e.g. because you edited it or something else replaced it."""
+    script_path, _, _ = _script_paths()
+    try:
+        last_mtime = os.path.getmtime(script_path)
+    except Exception:
+        return
+    while app_instance is None or app_instance.running:
+        time.sleep(1)
+        if app_instance is not None and not app_instance.running:
+            break
+        try:
+            mtime = os.path.getmtime(script_path)
+            if mtime != last_mtime:
+                last_mtime = mtime
+                trigger_relaunch_pipeline(f"{os.path.basename(script_path)} was modified on disk")
+                break
+        except Exception:
+            pass   # file briefly missing mid-write, etc. -- just try again next second
+
+
+# Show the splash immediately — before any heavy imports — so the user
+# sees something within milliseconds of launching the script.
+
+_splash_root   = None
+_splash_bar    = None
+_splash_label  = None
+_splash_pct    = None
+_host_root     = None   # the one-and-only tk.Tk() instance (kept hidden during splash)
+
+def _create_splash():
+    global _splash_root, _splash_bar, _splash_label, _splash_pct, _host_root
+
+    # Create the single tk.Tk() host window and keep it hidden.
+    # All ttk styles will be registered on this interpreter.
+    _host_root = tk.Tk()
+    _host_root.withdraw()
+
+    W, H = 480, 220
+    # Splash is a Toplevel so it shares the same Tk interpreter
+    splash = tk.Toplevel(_host_root)
+    splash.title("")
+    splash.resizable(False, False)
+    splash.overrideredirect(True)          # borderless window
+    sw = splash.winfo_screenwidth()
+    sh = splash.winfo_screenheight()
+    x  = (sw - W) // 2
+    y  = (sh - H) // 2
+    splash.geometry(f"{W}x{H}+{x}+{y}")
+    splash.configure(bg="#0f0f1a")
+
+    # Border frame
+    border = tk.Frame(splash, bg="#7c5cbf", padx=2, pady=2)
+    border.place(relx=0, rely=0, relwidth=1, relheight=1)
+    inner = tk.Frame(border, bg="#0f0f1a")
+    inner.pack(fill="both", expand=True)
+
+    # "Script by Nexovative"
+    tk.Label(inner, text="Script by Nexovative",
+             bg="#0f0f1a", fg="#f0c060",
+             font=("Segoe UI", 11, "bold")).pack(pady=(22, 0))
+
+    # App title
+    tk.Label(inner, text="VirtualBox Chat Bot",
+             bg="#0f0f1a", fg="#ffffff",
+             font=("Segoe UI", 18, "bold")).pack(pady=(4, 0))
+
+    # Status label
+    _splash_label = tk.Label(inner, text="Loading GUI...",
+                              bg="#0f0f1a", fg="#aaaaaa",
+                              font=("Segoe UI", 9))
+    _splash_label.pack(pady=(14, 4))
+
+    # Progress bar container
+    bar_bg = tk.Frame(inner, bg="#1e1e2e", height=18, width=380)
+    bar_bg.pack(pady=(0, 8))
+    bar_bg.pack_propagate(False)
+
+    _splash_bar = tk.Frame(bar_bg, bg="#3ddc97", width=0, height=18)
+    _splash_bar.place(x=0, y=0, relheight=1)
+
+    _splash_pct = tk.Label(inner, text="0%",
+                            bg="#0f0f1a", fg="#3ddc97",
+                            font=("Segoe UI", 8))
+    _splash_pct.pack()
+
+    _splash_root = splash
+    splash.lift()
+    # splash.attributes("-topmost", True)  # removed: caused splash to stay always on top
+    splash.update()
+
+def _update_splash(pct, label=None):
+    """Update progress bar (0-100) and optional status text (call from main thread)."""
+    if _splash_root is None:
+        return
+    try:
+        bar_width = int(380 * pct / 100)
+        _splash_bar.place(x=0, y=0, relheight=1, width=bar_width)
+        _splash_pct.configure(text=f"{pct}%")
+        if label:
+            _splash_label.configure(text=label)
+        _splash_root.update()
+    except Exception:
+        pass
+
+def _close_splash():
+    global _splash_root
+    if _splash_root:
+        try:
+            _splash_root.destroy()   # destroy only the Toplevel splash
+        except Exception:
+            pass
+        _splash_root = None
+    # _host_root stays alive — it becomes the main window
+
+# ── Show splash immediately ──
+_create_splash()
+_update_splash(5, "Loading GUI...")
+_check_for_update()   # checks GitHub, asks user if update available, restarts if accepted
+
+
 try:
     import virtualbox
     vbox_pkg = "virtualbox"
@@ -10312,6 +11028,38 @@ if __name__ == "__main__":
         main_ui_root = tk.Tk()
         main_gui_application = ChatPlaysApp(main_ui_root)
         main_gui_application.show_welcome_guide()   # show user guide on first launch
+
+        # Continuous auto-update watcher + file-edit hot-reload watchdog. Both run for
+        # the lifetime of the process.
+        threading.Thread(target=_autoupdate_watcher, daemon=True, name="autoupdate_watcher").start()
+        threading.Thread(target=_file_edit_watchdog, daemon=True, name="file_edit_watchdog").start()
+        start_tray_icon()
+
+        # If this instance was launched by the auto-update/hot-reload relaunch pipeline
+        # (--autostart-everything), self-start the bot from video_id.json with no one
+        # at the keyboard.
+        if _AUTOSTART_EVERYTHING:
+            def _auto_start_everything():
+                time.sleep(1.0)
+                try:
+                    vid_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "video_id.json")
+                    with open(vid_path, "r", encoding="utf-8") as f:
+                        saved_url = json.load(f).get("video_id", "")
+                    if saved_url:
+                        main_gui_application.entry_url.delete(0, "end")
+                        main_gui_application.entry_url.insert(0, saved_url)
+                        main_gui_application.go_live()
+                        print(f"[AutoStart] Self-started bot on '{saved_url}' from video_id.json.")
+                    else:
+                        print("[AutoStart] video_id.json had no video_id -- start the bot manually.")
+                except Exception as e:
+                    print(f"[AutoStart] Could not self-start from video_id.json: {e}")
+                if realpc_config.get("enabled"):
+                    print("[AutoStart] NOTE: Real PC Control was enabled before this restart. "
+                          "For safety it does NOT auto-resume -- go to the Real PC Control "
+                          "tab and click Start to re-confirm and resume it.")
+            threading.Thread(target=_auto_start_everything, daemon=True).start()
+
         main_ui_root.mainloop()
     except Exception as fatal_error:
         print("\n" + "="*60 + "\nscript crashed:\n" + "="*60)
