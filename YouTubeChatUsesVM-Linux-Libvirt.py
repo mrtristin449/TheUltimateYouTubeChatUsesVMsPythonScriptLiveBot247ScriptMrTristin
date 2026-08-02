@@ -161,12 +161,12 @@ VERSION = "1.0"   # increment this with every release
 # version exists, and applying it here would silently corrupt this install."
 # If version.json has no "filename" field at all, this check is skipped (so this still
 # works with a simple single-file repo) -- but IS enforced the moment that field appears.
-CURRENT_FILENAME = "YouTubeChatUsesVM-Linux-VMware.py"
+CURRENT_FILENAME = "YouTubeChatUsesVM-Linux-Libvirt.py"
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
-# GITHUB_SCRIPT_URL   → raw URL of THIS file (YouTubeChatUsesVM-Linux-VMware.py) in your repo
-#   Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VMware.py
+# GITHUB_SCRIPT_URL   → raw URL of THIS file (YouTubeChatUsesVM-Linux-Libvirt.py) in your repo
+#   Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-Libvirt.py
 #   (urllib needs the RAW content URL below, not the browsable page above --
 #   raw.githubusercontent.com serves the actual file bytes, github.com/.../blob/
 #   serves an HTML viewer page that urlopen() can't parse as source code.)
@@ -174,9 +174,9 @@ CURRENT_FILENAME = "YouTubeChatUsesVM-Linux-VMware.py"
 # Other Linux variants in this repo (for reference only -- deliberately NOT fetched or
 # checked by this script, only its OWN file above is ever downloaded/verified/replaced):
 #   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VBox.py
-#   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-Libvirt.py
+#   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VMware.py
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
-GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VMware.py"
+GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-Libvirt.py"
 
 # Public key used to verify the signature of downloaded updates.
 # This is SAFE to keep here — it can only verify signatures, not create them.
@@ -330,9 +330,9 @@ def _check_for_update():
 # and (if one was running) the web dashboard -- all without needing anyone at the
 # keyboard. Real PC Control is deliberately NOT auto-resumed this way -- see below.
 
-# Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VMware.py
+# Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-Libvirt.py
 AUTOUPDATE_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
-AUTOUPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VMware.py"
+AUTOUPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-Libvirt.py"
 AUTOUPDATE_POLL_INTERVAL = 1  # seconds -- checked with a conditional GET (ETag), so most
                               # checks are cheap "304 Not Modified" responses, not full downloads.
 
@@ -348,7 +348,8 @@ def _script_paths():
     folder = os.path.dirname(script_path)
     base_name = os.path.splitext(os.path.basename(script_path))[0]
     # If we're already running as a previously-generated "_autostarteverything" copy --
-    # plain OR numbered, e.g. "_autostarteverything(3)" -- strip that suffix so we don't
+    # plain OR numbered, e.g. "_autostarteverything_3" (or older "_autostarteverything(3)"
+    # files still on disk from before parens were dropped) -- strip that suffix so we don't
     # end up with "..._autostarteverything_autostarteverything" or comparing the wrong
     # name against CURRENT_FILENAME/GITHUB_SCRIPT_URL.
     base_name = _AUTOSTART_SUFFIX_RE.sub("", base_name)
@@ -554,8 +555,15 @@ pkill -9 -u "$(whoami)" -f "{base_name}" 2>/dev/null
 sleep 2
 
 echo "Refreshing version.json..."
-curl -fsSL "{AUTOUPDATE_VERSION_URL}" -o "{os.path.join(folder, 'version.json')}" || \\
-    echo "WARNING: could not refresh version.json (non-fatal, continuing)"
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "{AUTOUPDATE_VERSION_URL}" -o "{os.path.join(folder, 'version.json')}" || \\
+        echo "WARNING: could not refresh version.json (non-fatal, continuing)"
+elif command -v wget >/dev/null 2>&1; then
+    wget -q "{AUTOUPDATE_VERSION_URL}" -O "{os.path.join(folder, 'version.json')}" || \\
+        echo "WARNING: could not refresh version.json (non-fatal, continuing)"
+else
+    echo "WARNING: neither curl nor wget found -- could not refresh version.json (non-fatal, continuing)"
+fi
 
 if [ ! -f "{autostart_path}" ]; then
     echo "============================================================"
@@ -717,7 +725,7 @@ def trigger_relaunch_pipeline(reason, version_data=None, source_path=None):
     script (correct for the manual Restart Bot button and for the watchdog when it's
     the running file itself that changed) -- but the watchdog can pass a DIFFERENT
     path here when it's the original base_name.py that changed instead, which is a
-    different file entirely once running as a generation-2+ _autostarteverything(N)
+    different file entirely once running as a generation-2+ _autostarteverything_N
     copy. Copying from the wrong one would silently discard whichever edit actually
     happened."""
     global _autoupdate_relaunch_triggered
@@ -900,7 +908,7 @@ def _autoupdate_watcher():
 def _discover_autostart_generations(folder, base_name):
     """Finds every existing generation of this script on disk: the original
     base_name.py, the plain base_name_autostarteverything.py, and every numbered
-    base_name_autostarteverything(N).py -- returns their full paths. Used so the
+    base_name_autostarteverything_N.py -- returns their full paths. Used so the
     watchdog can watch ALL of them, not just whichever one happens to be running."""
     found = []
     original = os.path.join(folder, f"{base_name}.py")
@@ -923,9 +931,9 @@ def _discover_autostart_generations(folder, base_name):
 def _file_edit_watchdog():
     """Watches for on-disk changes to relaunch from -- EVERY existing generation of
     this script found in the folder: the original base_name.py, the plain
-    _autostarteverything.py, and every numbered _autostarteverything(N).py, not just
+    _autostarteverything.py, and every numbered _autostarteverything_N.py, not just
     whichever one happens to be currently running. Watching only the running file was
-    the actual bug: once running as, say, "..._autostarteverything(1).py", replacing
+    the actual bug: once running as, say, "..._autostarteverything_1.py", replacing
     the ORIGINAL "base_name.py" -- or an older generation like "(0)" -- went
     completely unnoticed, since those are different files the watchdog was never
     looking at. Re-scans the folder each cycle (cheap -- one os.listdir() a second) so
@@ -1122,6 +1130,17 @@ import json
 from tkinter import ttk, scrolledtext, messagebox
 
 _update_splash(58, "Importing media / web libraries...")
+
+# ── Optional dep for libvirt QMP-based keyboard/mouse input (used only when the
+#    libvirt backend is selected -- VMware/VBox continue using VNC as before) ──
+try:
+    import libvirt as _pylibvirt
+    import libvirt_qemu as _pylibvirt_qemu
+    pylibvirt_available = True
+except ImportError:
+    _pylibvirt = None
+    _pylibvirt_qemu = None
+    pylibvirt_available = False
 
 # ── Optional dep for Gemini-based pre-execution safety/copyright screening ──
 try:
@@ -2349,7 +2368,9 @@ def vnc_disconnect_now():
         _vnc_client = None
 
 def vnc_key_down(key_name):
-    """Presses (and holds) a named key over VNC."""
+    """Presses (and holds) a named key -- QMP for libvirt, VNC for VMware/VBox."""
+    if current_vm_backend == "libvirt":
+        return qemu_key_down(key_name)
     mapped = SCANCODES.get(key_name, key_name)
     with _vnc_lock:
         client = vnc_connect_fresh()
@@ -2363,7 +2384,9 @@ def vnc_key_down(key_name):
             vnc_disconnect_now()
 
 def vnc_key_up(key_name):
-    """Releases a named key over VNC."""
+    """Releases a named key -- QMP for libvirt, VNC for VMware/VBox."""
+    if current_vm_backend == "libvirt":
+        return qemu_key_up(key_name)
     mapped = SCANCODES.get(key_name, key_name)
     with _vnc_lock:
         client = vnc_connect_fresh()
@@ -2409,7 +2432,10 @@ def parse_combo_keys(args):
     return result
 
 def send_combo(keys):
-    """Holds down a chord of keys (e.g. ['win','r']) then releases them in reverse order."""
+    """Holds down a chord of keys (e.g. ['win','r']) then releases them in reverse
+    order -- QMP for libvirt, VNC for VMware/VBox."""
+    if current_vm_backend == "libvirt":
+        return qemu_send_combo(keys)
     with _vnc_lock:
         client = vnc_connect_fresh()
         if not client:
@@ -2587,8 +2613,495 @@ def vbox_type_text(vm_name, text, vbox_path=None):
     vbox_path = vbox_path or VBOXMANAGE_PATH
     return subprocess.run([vbox_path, "controlvm", vm_name, "keyboardputstring", text], capture_output=True, text=True)
 
+def get_virsh_path():
+    """Locates virsh, libvirt's command-line control tool. Unlike vmrun/VBoxManage this
+    is Linux-only -- libvirt (KVM/QEMU) doesn't have a native Windows or macOS build the
+    way VMware and VirtualBox do, so no cross-platform path list is needed here."""
+    possible_paths = ["/usr/bin/virsh", "/usr/local/bin/virsh", "/bin/virsh"]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return "virsh"  # fall back to PATH resolution
+
+def get_libvirt_uri(virsh_path=None):
+    """Auto-detects which libvirt connection URI actually works on this machine, rather
+    than assuming one. qemu:///system (root/libvirtd-group-managed, the "standard"
+    default most documentation assumes) is tried first, but plenty of desktop
+    virt-manager setups run under qemu:///session instead (no root or group membership
+    needed at all) -- if system can't even be reached, session is tried as a fallback.
+    Only actually runs virsh twice, once at startup -- the result is cached in
+    LIBVIRT_URI below, not re-detected on every call."""
+    virsh_path = virsh_path or "virsh"
+    for candidate in ("qemu:///system", "qemu:///session"):
+        try:
+            res = subprocess.run([virsh_path, "-c", candidate, "list", "--all"],
+                                  capture_output=True, text=True, timeout=10)
+            if res.returncode == 0:
+                return candidate
+        except Exception:
+            continue
+    return "qemu:///system"   # neither worked -- fall back to the documented default so
+                               # error messages at least point at something standard
+
+# ── QEMU QMP-based keyboard/mouse input, used only when current_vm_backend ==
+#    "libvirt". This talks directly to the QEMU process's own monitor via libvirt's
+#    qemuMonitorCommand extension (input-send-event) instead of going through a VNC
+#    connection -- no VNC host/port/password to configure at all, works even if the
+#    domain has no <graphics> device defined, and is QEMU's own native mechanism for
+#    exactly this. VMware/VBox are completely unaffected -- they still use the
+#    existing VNC path below unchanged. ──
+
+# Maps this script's existing key names (same names used throughout SCANCODES, so
+# !type/!send/!combo/!key all work identically regardless of backend) to QEMU's
+# QKeyCode wire names. Verified directly against a live QEMU 10.1.2 monitor's own
+# `sendkey` tab-completion list, not just documentation -- "ret" not "enter", "spc"
+# not "space", "caps_lock" not "capslock", "meta_l" not "win", etc.
+QEMU_QCODES = {
+    "esc": "esc", "escape": "esc",
+    "tab": "tab",
+    "enter": "ret", "return": "ret",
+    "space": "spc",
+    "backspace": "backspace",
+    "delete": "delete", "del": "delete",
+    "insert": "insert", "ins": "insert",
+    "home": "home",
+    "end": "end",
+    "pageup": "pgup", "pgup": "pgup",
+    "pagedown": "pgdn", "pgdn": "pgdn",
+    "ctrl": "ctrl", "control": "ctrl",
+    "alt": "alt",
+    "shift": "shift",
+    "capslock": "caps_lock",
+    "win": "meta_l", "super": "meta_l", "windows": "meta_l",
+    "up": "up", "down": "down", "left": "left", "right": "right",
+    "f1": "f1", "f2": "f2", "f3": "f3", "f4": "f4", "f5": "f5", "f6": "f6",
+    "f7": "f7", "f8": "f8", "f9": "f9", "f10": "f10", "f11": "f11", "f12": "f12",
+}
+for _c in "abcdefghijklmnopqrstuvwxyz0123456789":
+    QEMU_QCODES[_c] = _c
+del _c
+
+# Punctuation/symbol characters typed via !type/!send that need shift + a base qcode,
+# same idea as SCANCODES' shift-handling for VNC but with QEMU's own qcode names for
+# the base key each symbol sits on (US keyboard layout).
+QEMU_SHIFT_SYMBOLS = {
+    '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7',
+    '*': '8', '(': '9', ')': '0', '_': 'minus', '+': 'equal',
+    '{': 'bracket_left', '}': 'bracket_right', '|': 'backslash',
+    ':': 'semicolon', '"': 'apostrophe', '<': 'comma', '>': 'dot', '?': 'slash',
+    '~': 'grave_accent',
+}
+QEMU_PLAIN_SYMBOLS = {
+    '-': 'minus', '=': 'equal', '[': 'bracket_left', ']': 'bracket_right',
+    '\\': 'backslash', ';': 'semicolon', "'": 'apostrophe', ',': 'comma',
+    '.': 'dot', '/': 'slash', '`': 'grave_accent',
+}
+
+def _qemu_get_domain():
+    """Opens a fresh libvirt connection and looks up the currently-active VM as a
+    domain object. Returns None (logging why) if libvirt-python isn't installed, the
+    connection fails, or the domain isn't found -- callers treat None as "couldn't
+    send this input" and skip cleanly rather than crash."""
+    if not pylibvirt_available:
+        print("[QMP] libvirt-python is not installed -- run: pip install libvirt-python "
+              "--break-system-packages")
+        return None, None
+    if not VMX_PATH:
+        return None, None
+    try:
+        conn = _pylibvirt.open(LIBVIRT_URI)
+        if conn is None:
+            print(f'[QMP] Could not open libvirt connection to {LIBVIRT_URI}')
+            return None, None
+        domain = conn.lookupByName(VMX_PATH)
+        return conn, domain
+    except Exception as e:
+        print(f'[QMP] Could not get domain for \'{VMX_PATH}\': Python exception: "{traceback.format_exc()}"')
+        return None, None
+
+def _qemu_send_input_events(events):
+    """Sends one or more QMP input-send-event events to the current libvirt VM in a
+    single call (QMP supports batching multiple key-down events together, e.g. for a
+    combo, more efficiently than VNC's one-at-a-time approach). Logs the full QMP
+    response text on failure so a wrong wire-format guess (e.g. button naming) shows
+    up clearly in the console instead of failing silently."""
+    conn, domain = _qemu_get_domain()
+    if domain is None:
+        return False
+    try:
+        cmd = json.dumps({
+            "execute": "input-send-event",
+            "arguments": {"events": events}
+        })
+        response = _pylibvirt_qemu.qemuMonitorCommand(
+            domain, cmd, _pylibvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_DEFAULT)
+        try:
+            parsed = json.loads(response)
+            if "error" in parsed:
+                print(f'[QMP] input-send-event returned an error: {parsed["error"]}')
+                return False
+        except (ValueError, TypeError):
+            pass   # non-JSON or unparseable response -- treat as best-effort success
+        return True
+    except Exception as e:
+        print(f'[QMP] send_input_events error: Python exception: "{traceback.format_exc()}"')
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+def _qemu_key_event(qcode, down):
+    return _qemu_send_input_events([
+        {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": qcode}}}
+    ])
+
+def qemu_key_down(key_name):
+    """Presses (and holds) a named key via QMP. Mirrors vnc_key_down()'s interface."""
+    qcode = QEMU_QCODES.get(key_name, key_name)
+    return _qemu_key_event(qcode, True)
+
+def qemu_key_up(key_name):
+    """Releases a named key via QMP. Mirrors vnc_key_up()'s interface."""
+    qcode = QEMU_QCODES.get(key_name, key_name)
+    return _qemu_key_event(qcode, False)
+
+def qemu_send_combo(keys):
+    """Holds down a chord of keys then releases them in reverse order, via QMP.
+    Mirrors send_combo()'s interface."""
+    key_names = [k.strip() for k in keys]
+    qcodes = [QEMU_QCODES.get(k, k) for k in key_names]
+    events_down = [{"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": q}}}
+                   for q in qcodes]
+    _qemu_send_input_events(events_down)
+    time.sleep(0.02)
+    events_up = [{"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": q}}}
+                 for q in reversed(qcodes)]
+    _qemu_send_input_events(events_up)
+    print(f"[KB/QMP] Combo sent: {'+'.join(key_names)}")
+
+def qemu_send_keyboard(text):
+    """Types a string of text into the VM via QMP. Mirrors send_keyboard()'s
+    interface."""
+    for char in text:
+        qcode = None
+        needs_shift = False
+        if char.isalpha():
+            qcode = char.lower()
+            needs_shift = char.isupper()
+        elif char.isdigit():
+            qcode = char
+        elif char == ' ':
+            qcode = 'spc'
+        elif char in QEMU_SHIFT_SYMBOLS:
+            qcode = QEMU_SHIFT_SYMBOLS[char]
+            needs_shift = True
+        elif char in QEMU_PLAIN_SYMBOLS:
+            qcode = QEMU_PLAIN_SYMBOLS[char]
+        else:
+            continue   # unmappable character -- skip rather than send garbage
+        if needs_shift:
+            _qemu_key_event("shift", True)
+        _qemu_key_event(qcode, True)
+        time.sleep(0.005)
+        _qemu_key_event(qcode, False)
+        if needs_shift:
+            _qemu_key_event("shift", False)
+        time.sleep(0.005)
+    print(f"[KB/QMP] Typed: {text}")
+
+def qemu_send_scancode(key_name):
+    """Presses and releases a single named key via QMP. Mirrors send_scancode()'s
+    interface."""
+    qcode = QEMU_QCODES.get(key_name, key_name)
+    _qemu_key_event(qcode, True)
+    time.sleep(0.02)
+    _qemu_key_event(qcode, False)
+
+# QEMU's absolute pointer axis range, confirmed against QEMU's own VNC server source
+# (ui/vnc.c: "x * 0x7FFF / (width - 1)") and cross-checked against an independent,
+# unrelated project doing the same EV_ABS scaling -- NOT the 0x7ffff figure from an
+# old, likely-mistyped 2014 mailing list comment that would be 16x too large.
+QEMU_ABS_MAX = 0x7FFF   # 32767
+_qemu_cursor = {"x": 960, "y": 540}   # tracks last-set position, same role as _vnc_cursor
+
+def _qemu_scale_abs(x, y, screen_w=1920, screen_h=1080):
+    qx = max(0, min(QEMU_ABS_MAX, int(x / screen_w * QEMU_ABS_MAX)))
+    qy = max(0, min(QEMU_ABS_MAX, int(y / screen_h * QEMU_ABS_MAX)))
+    return qx, qy
+
+def _qemu_hmp(cmd_str):
+    """Runs a single Human Monitor Protocol command against the current libvirt VM,
+    via `virsh qemu-monitor-command <vm> --hmp "<cmd>"`. Used specifically for mouse
+    control -- confirmed working directly by the user against a real running VM,
+    which is stronger evidence than the QMP JSON input-send-event approach this
+    replaces (that one was carefully researched but never actually verified against
+    a live VM). Logs the full virsh stderr on failure so a wrong command string shows
+    up clearly in the console."""
+    virsh_path = VIRSH_PATH
+    uri = LIBVIRT_URI
+    if not VMX_PATH:
+        return False
+    try:
+        res = subprocess.run([virsh_path, "-c", uri, "qemu-monitor-command", VMX_PATH,
+                              "--hmp", cmd_str],
+                             capture_output=True, text=True, timeout=10)
+        if res.returncode != 0:
+            print(f'[HMP] \'{cmd_str}\' failed: {(res.stderr or "").strip() or "no error output"}')
+            return False
+        return True
+    except Exception as e:
+        print(f'[HMP] \'{cmd_str}\' error: Python exception: "{traceback.format_exc()}"')
+        return False
+
+def qemu_mouse_move(x, y):
+    """Moves the pointer to (x, y) via the HMP mouse_move command, in the exact
+    format confirmed working directly against a real VM: passed through as given,
+    not scaled to QEMU's 0-32767 absolute range -- whether this behaves as absolute
+    or relative movement depends on the guest's configured pointer device (absolute
+    if it has a USB tablet, relative/PS2-style otherwise), which this script has no
+    way to detect, so it simply matches the tested, working command format exactly."""
+    _qemu_cursor["x"] = max(0, min(1920, x))
+    _qemu_cursor["y"] = max(0, min(1080, y))
+    _qemu_hmp(f"mouse_move {_qemu_cursor['x']} {_qemu_cursor['y']}")
+
+# HMP mouse_button is a STATE bitmask, not a per-button press/release event -- setting
+# it replaces the entire current button state, and 0 releases everything at once.
+# Verified against CURRENT official QEMU docs (qemu-project.gitlab.io/qemu/system/
+# monitor.html): 1=Left, 2=Right, 4=Middle. Deliberately NOT 1=L,2=M,4=R, which is
+# what many older/historical QEMU forks' docs say -- the current, authoritative
+# source takes precedence here since middle and right are swapped between the two.
+QEMU_HMP_BUTTON_BITS = {1: 1, 2: 4, 3: 2}   # our numbering (1=L,2=M,3=R) -> HMP bitmask
+
+def qemu_mouse_button(button, down):
+    """Sets the mouse button state via HMP. button matches vncdotool's convention
+    (1=left, 2=middle, 3=right, 4=wheel-up, 5=wheel-down) so callers don't need
+    backend-specific branching for which number means what. Wheel buttons (4/5) are
+    handled via qemu_mouse_scroll() instead, since QEMU's HMP represents scrolling as
+    a third argument to mouse_move, not a mouse_button bitmask value."""
+    if button in (4, 5):
+        qemu_mouse_scroll(1 if button == 4 else -1)
+        return
+    bit = QEMU_HMP_BUTTON_BITS.get(button, 1)
+    _qemu_hmp(f"mouse_button {bit if down else 0}")
+
+def qemu_mouse_scroll(dz):
+    """Scrolls via mouse_move's documented optional third parameter (dx dy dz) --
+    QEMU's own HMP represents wheel movement this way, not as a mouse_button bitmask
+    value the way left/middle/right clicks are."""
+    _qemu_hmp(f"mouse_move 0 0 {dz}")
+
+def qemu_mouse_click(button, count=1):
+    for _ in range(count):
+        qemu_mouse_button(button, True)
+        time.sleep(0.1)
+        qemu_mouse_button(button, False)
+        time.sleep(0.1)
+
+def qemu_mouse_drag(x, y):
+    """Drags with the left button held from the current position to (x, y), matching
+    the user's confirmed-working sequence: press, brief pause, move, brief pause,
+    release."""
+    qemu_mouse_button(1, True)
+    time.sleep(0.2)
+    qemu_mouse_move(x, y)
+    time.sleep(0.2)
+    qemu_mouse_button(1, False)
+
+def get_all_libvirt_vms(virsh_path=None, uri=None):
+    """Returns every VM (domain, in libvirt terminology) registered with libvirt --
+    running and stopped alike, matching how get_all_vbox_vms() lists both states too."""
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    vms = []
+    try:
+        res = subprocess.run([virsh_path, "-c", uri, "list", "--all", "--name"],
+                              capture_output=True, text=True, timeout=10)
+        for line in res.stdout.splitlines():
+            name = line.strip()
+            if name:
+                vms.append(name)
+    except Exception:
+        pass
+    return vms
+
+def get_libvirt_snapshots(vm_name, virsh_path=None, uri=None):
+    """Lists snapshot names for a libvirt VM via 'virsh snapshot-list --name'."""
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    snaps = []
+    try:
+        res = subprocess.run([virsh_path, "-c", uri, "snapshot-list", vm_name, "--name"],
+                              capture_output=True, text=True, timeout=15)
+        for line in res.stdout.splitlines():
+            name = line.strip()
+            if name:
+                snaps.append(name)
+    except Exception:
+        pass
+    return snaps
+
+def libvirt_is_running(vm_name, virsh_path=None, uri=None):
+    """Reports whether the watchdog should treat this VM as needing a restart.
+    Deliberately defensive/conservative: only a DEFINITIVE down-state (shut off,
+    crashed) returns False and triggers the watchdog's restart. Everything else --
+    paused, in shutdown, pmsuspended, an unrecognized state, a connection error, a
+    timeout -- returns True (assume still alive, leave it alone). This is an
+    allowlist-of-bad-states, not an allowlist-of-good-states, on purpose: a false "it's
+    down" actively disrupts a working VM (interrupting a live install, as seen), while
+    a false "it's up" just means the next check a few seconds later catches a genuine
+    crash instead of this one -- a much cheaper mistake to make."""
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    if not vm_name:
+        # An empty VM name is NOT the same kind of "can't check" as a connection error
+        # below -- there is no VM to even ask about, so there is definitely nothing
+        # running. Returning True here (as the old code did) was masking a genuine
+        # "nothing was ever selected/started" failure as a false success.
+        return False
+    if not virsh_path:
+        return True   # can't check at all -- don't assume down and disrupt on a guess
+    DEFINITELY_DOWN = ("shut off", "crashed")
+    try:
+        res = subprocess.run([virsh_path, "-c", uri, "domstate", vm_name],
+                              capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            # The virsh call itself failed -- wrong URI, permission denied, VM name not
+            # found under this connection, etc. This is NOT the same thing as "ran fine,
+            # domain is shut off" (a clean call returns exit 0 with "shut off" on
+            # stdout for a stopped VM) -- we genuinely don't know the VM's state here,
+            # so don't guess "down" and risk disrupting a VM that's actually fine.
+            err = (res.stderr or "").strip()
+            print(f"[virsh] domstate failed for '{vm_name}' (uri={uri}): {err or 'no error output'} "
+                  f"-- treating as still running rather than risk a disruptive restart on a guess.")
+            return True
+        state = (res.stdout or "").strip().lower()
+        return state not in DEFINITELY_DOWN
+    except Exception as e:
+        print(f"[virsh] domstate error: {e} -- treating as still running rather than "
+              f"risk a disruptive restart on a guess.")
+        return True
+
+def libvirt_start(vm_name, gui=True, virsh_path=None, uri=None):
+    # No gui/headless distinction at start time the way vmrun/VBoxManage have one --
+    # a libvirt VM's display (VNC/SPICE/none) is fixed as part of its XML definition,
+    # not chosen per-launch, so `gui` is accepted for signature consistency with the
+    # other backends' vm_start() but has nothing to actually do here.
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    res = subprocess.run([virsh_path, "-c", uri, "start", vm_name], capture_output=True, text=True)
+    if res.returncode != 0:
+        # virsh start can report a non-zero exit while the VM is actually booting fine
+        # underneath -- e.g. a harmless SeaBIOS/QEMU boot-time diagnostic (like an
+        # AIO/libaio informational note) getting surfaced through stderr as if it were
+        # a fatal error. Rather than trust the exit code alone, give the domain a moment
+        # to settle and check its ACTUAL state -- if it's genuinely up despite what the
+        # exit code claimed, treat this as the success it actually was instead of
+        # triggering a disruptive, unnecessary retry loop on a VM that's fine.
+        time.sleep(2)
+        if libvirt_is_running(vm_name, virsh_path, uri):
+            print(f"[virsh] start reported exit {res.returncode} but '{vm_name}' is actually "
+                  f"running now -- treating as success. (stderr was: {(res.stderr or '').strip()[:200]})")
+            return subprocess.CompletedProcess(res.args, 0, res.stdout, res.stderr)
+    return res
+
+def libvirt_stop(vm_name, hard=True, virsh_path=None, uri=None):
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    verb = "destroy" if hard else "shutdown"   # destroy = hard power-off, shutdown = graceful ACPI
+    return subprocess.run([virsh_path, "-c", uri, verb, vm_name], capture_output=True, text=True)
+
+def libvirt_reset(vm_name, virsh_path=None, uri=None):
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    return subprocess.run([virsh_path, "-c", uri, "reset", vm_name], capture_output=True, text=True)
+
+def libvirt_revert_to_snapshot(vm_name, snapshot_name, virsh_path=None, uri=None):
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    try:
+        res = subprocess.run([virsh_path, "-c", uri, "snapshot-revert", vm_name, snapshot_name],
+                             capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(e.cmd, 1, e.stdout or "",
+                                           (e.stderr or "") + " (timed out after 60s)")
+    if res.returncode == 0:
+        # Known libvirt quirk: snapshot-revert can leave the domain PAUSED even when
+        # the original snapshot was taken while running, depending on snapshot type
+        # and libvirt/QEMU version. Explicitly resuming is a safe no-op if it already
+        # came back running, and fixes it when it didn't.
+        try:
+            subprocess.run([virsh_path, "-c", uri, "resume", vm_name],
+                           capture_output=True, text=True, timeout=15)
+        except Exception:
+            pass   # best-effort -- the revert itself already succeeded either way
+    return res
+
+def libvirt_take_snapshot(vm_name, snapshot_name, virsh_path=None, uri=None):
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    return subprocess.run([virsh_path, "-c", uri, "snapshot-create-as", vm_name, snapshot_name],
+                           capture_output=True, text=True)
+
+def _libvirt_first_interface(vm_name, virsh_path=None, uri=None):
+    """Finds the name of a VM's first network interface via 'virsh domiflist', needed
+    for domif-setlink below -- unlike VBoxManage's setlinkstate1 (which just takes a
+    fixed NIC index), virsh needs the actual interface name.
+
+    The separator line's length varies with the actual column content widths (longer
+    interface names/MAC addresses widen the table and lengthen the separator to
+    match) -- it is NOT a fixed 10 dashes, confirmed against multiple real-world
+    domiflist examples ranging from ~35 to 66+ characters. Checking for an exact
+    "----------" match was the actual bug: it essentially never matched, so the
+    separator line itself kept getting returned as the "interface name" and passed
+    straight into domif-setlink, where virsh's own argument parser saw a string
+    starting with "--" and rejected it as an unrecognized option. This now detects a
+    separator line by content (all dashes) rather than by a specific length."""
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    try:
+        res = subprocess.run([virsh_path, "-c", uri, "domiflist", vm_name],
+                              capture_output=True, text=True, timeout=15)
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            first = parts[0]
+            if first == "Interface" or set(first) == {"-"}:
+                continue   # header row, or a separator line of any length
+            return first
+    except Exception:
+        pass
+    return None
+
+def libvirt_toggle_internet(vm_name, enable, virsh_path=None, uri=None):
+    """Live, no-restart-needed internet toggle for a libvirt VM -- the virsh equivalent
+    of vbox_toggle_internet()'s setlinkstate1, using domif-setlink on the VM's first
+    detected network interface instead."""
+    virsh_path = virsh_path or VIRSH_PATH
+    uri = uri or LIBVIRT_URI
+    iface = _libvirt_first_interface(vm_name, virsh_path, uri)
+    if not iface or iface.startswith("-"):
+        # Defensive second check, independent of the parsing fix above -- no value
+        # that could be misread as an option flag should ever reach domif-setlink as
+        # a positional argument, regardless of why it ended up looking that way.
+        return subprocess.CompletedProcess([], 1, "",
+            f"no usable network interface name found for this VM (got {iface!r})")
+    state = "up" if enable else "down"
+    try:
+        res = subprocess.run([virsh_path, "-c", uri, "domif-setlink", vm_name, iface, state],
+                              capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        return subprocess.CompletedProcess([], 1, "", str(e))
+    return res
+
 VMRUN_PATH    = get_vmrun_path()
 VBOXMANAGE_PATH = get_vboxmanage_path()
+VIRSH_PATH = get_virsh_path()
+LIBVIRT_URI = get_libvirt_uri(VIRSH_PATH)
+print(f"[Libvirt] Using connection URI: {LIBVIRT_URI}")
 SNAPSHOT_NAME = "snp"   # name of the snapshot used by !revert / revertToSnapshot
 COOLDOWN_START  = 120
 
@@ -2596,46 +3109,74 @@ def vm_start(target, backend=None, gui=True):
     backend = backend or current_vm_backend
     if backend == "vbox":
         return vbox_start(target, gui, VBOXMANAGE_PATH)
+    elif backend == "libvirt":
+        return libvirt_start(target, gui, VIRSH_PATH)
     return subprocess.run([VMRUN_PATH, "-T", VMRUN_TARGET_TYPE, "start", target, "gui" if gui else "nogui"], capture_output=True, text=True, timeout=30)
 
 def vm_stop(target, backend=None, hard=True):
     backend = backend or current_vm_backend
     if backend == "vbox":
         return vbox_stop(target, hard, VBOXMANAGE_PATH)
-    return subprocess.run([VMRUN_PATH, "-T", VMRUN_TARGET_TYPE, "stop", target, "hard" if hard else "soft"], capture_output=True, text=True, timeout=20)
+    elif backend == "libvirt":
+        return libvirt_stop(target, hard, VIRSH_PATH)
+    # Explicit timeout is required here -- vmrun stop ... soft is documented to block
+    # until the guest OS itself confirms it shut down (it needs VMware Tools relaying
+    # that confirmation). If the guest never responds for any reason, this call would
+    # otherwise hang indefinitely, which silently defeats any caller's own timeout/
+    # escalation logic built around calling this (like robust_vm_poweroff's tiered
+    # shutdown) since the caller's timeout never gets a chance to run at all.
+    try:
+        return subprocess.run([VMRUN_PATH, "-T", VMRUN_TARGET_TYPE, "stop", target,
+                               "hard" if hard else "soft"],
+                              capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(
+            e.cmd, 1, e.stdout or "",
+            (e.stderr or "") + " (timed out after 20s -- guest did not respond to the shutdown request)")
 
 def vm_reset(target, backend=None):
     backend = backend or current_vm_backend
     if backend == "vbox":
         return vbox_reset(target, VBOXMANAGE_PATH)
+    elif backend == "libvirt":
+        return libvirt_reset(target, VIRSH_PATH)
     return subprocess.run([VMRUN_PATH, "-T", VMRUN_TARGET_TYPE, "reset", target, "hard"], capture_output=True, text=True, timeout=20)
 
 def vm_revert_to_snapshot(target, snapshot_name, backend=None):
     backend = backend or current_vm_backend
     if backend == "vbox":
         return vbox_revert_to_snapshot(target, snapshot_name, VBOXMANAGE_PATH)
+    elif backend == "libvirt":
+        return libvirt_revert_to_snapshot(target, snapshot_name, VIRSH_PATH)
     return subprocess.run([VMRUN_PATH, "-T", VMRUN_TARGET_TYPE, "revertToSnapshot", target, snapshot_name], capture_output=True, text=True, timeout=60)
 
 def vm_take_snapshot(target, snapshot_name, backend=None):
     backend = backend or current_vm_backend
     if backend == "vbox":
         return vbox_take_snapshot(target, snapshot_name, VBOXMANAGE_PATH)
+    elif backend == "libvirt":
+        return libvirt_take_snapshot(target, snapshot_name, VIRSH_PATH)
     return subprocess.run([VMRUN_PATH, "-T", VMRUN_TARGET_TYPE, "snapshot", target, snapshot_name], capture_output=True, text=True, timeout=60)
 
 def vm_is_running(target, backend=None):
     backend = backend or current_vm_backend
     if backend == "vbox":
         return vbox_is_running(target, VBOXMANAGE_PATH)
+    elif backend == "libvirt":
+        return libvirt_is_running(target, VIRSH_PATH)
     return vmrun_is_running(target)
 
 def vm_type_text(target, text, backend=None):
     """Types text into whichever backend currently owns the VM -- vmrun's own typeKeystrokes
     equivalent lives further down this file for the vmware path; this dispatches to
-    vbox_type_text (VBoxManage keyboardputstring) for the vbox path."""
+    vbox_type_text (VBoxManage keyboardputstring) for the vbox path. libvirt VMs type via
+    this script's existing VNC mechanism, same as vmware -- falls through to the same
+    None return, since there's no virsh equivalent to "type this string" the way
+    VBoxManage keyboardputstring or vmrun typeKeystrokes work."""
     backend = backend or current_vm_backend
     if backend == "vbox":
         return vbox_type_text(target, text, VBOXMANAGE_PATH)
-    return None  # vmware path types via this script's own existing VNC/vmrun mechanism, unchanged
+    return None  # vmware and libvirt both type via this script's own existing VNC mechanism, unchanged
 
 def get_backend_for_vm(vm_identifier):
     """Looks up which backend a given VM identifier belongs to, by matching it against
@@ -2650,10 +3191,20 @@ def _checked(completed_process):
     """subprocess.run's check=True equivalent for the vm_*() wrappers above, which
     deliberately return a CompletedProcess without raising (so callers that just want to
     check .returncode can). retry_vbox() specifically needs a raise on failure to detect
-    a failed attempt and retry -- this bridges that."""
+    a failed attempt and retry -- this bridges that.
+
+    Raises a plain RuntimeError with the actual command's stderr baked directly into the
+    message, rather than subprocess.CalledProcessError -- CalledProcessError DOES store
+    stdout/stderr as attributes, but its default str() never includes them, only "Command
+    'X' returned non-zero exit status N." Every caller that logs this via an f-string
+    (str(e)) was silently losing the real reason a command failed (e.g. virsh's actual
+    "failed to connect to the hypervisor" / "domain not found" text) and only ever
+    showing that generic, unhelpful line instead."""
     if completed_process is not None and completed_process.returncode != 0:
-        raise subprocess.CalledProcessError(completed_process.returncode, "vm command",
-                                             completed_process.stdout, completed_process.stderr)
+        stderr_text = (completed_process.stderr or "").strip()
+        stdout_text = (completed_process.stdout or "").strip()
+        detail = stderr_text or stdout_text or "(no output captured)"
+        raise RuntimeError(f"command exited {completed_process.returncode}: {detail}")
     return completed_process
 
 VOTES_JSON_FILE = "votes.json"
@@ -3389,12 +3940,15 @@ TEST_MODE_ENABLED = False
 ERROR_LOG_FILE = "error_log.txt"
 
 def log_error(source, error, extra=""):
-    """Append a timestamped error entry to error_log.txt."""
+    """Append a timestamped error entry to error_log.txt. `extra` is typically the raw
+    exception text (str(e)) -- formatted as Python exception: "..." so the actual
+    Python/libvirt/vmrun/VBoxManage error text is always clearly labeled and easy to
+    spot in the log, rather than just tacked on after a bare pipe character."""
     try:
         ts  = time.strftime("%Y-%m-%d %H:%M:%S")
         msg = f"[{ts}] [{source}] {error}"
         if extra:
-            msg += f" | {extra}"
+            msg += f' | Python exception: "{extra}"'
         with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
         print(f"[ErrorLog] {msg}")
@@ -4166,6 +4720,8 @@ def ai_check_risk(text, kind="text"):
         print(f'[AI Safety/{label}] CHECK ERROR ({kind}) -- failing open, "{text[:60]}" was allowed unchecked. '
               f'Python exception: "{traceback.format_exc()}"')
         return False, f"check failed, allowed by default: {e}"
+
+
 def save_autostart_everything_config(backend=None, vm=None, watchdog=None, test_mode=None,
                                       os_voting_vm=None, os_voting_backend=None,
                                       ai_safety_enabled=None, ai_safety_provider=None,
@@ -4497,12 +5053,13 @@ def apply_current_os_scene():
         print(f'[OBS] apply_current_os_scene error: Python exception: "{traceback.format_exc()}"')
 
 def _kill_backend_processes(vm_name, backend, nuclear=False):
-    """Force-kills the OS-level process(es) actually backing a specific VM -- used as
-    an escalation step when the backend's own stop/poweroff command hasn't actually
-    gotten the VM to stop within the allotted time. Targets only THIS VM's process by
-    matching its name/path in the process command line, not every VM under that
-    backend. nuclear=True additionally widens the match, for the final, most
-    aggressive tier."""
+    """Force-kills the OS-level process(es) actually backing a specific VM -- the
+    Linux equivalent of what Windows would call taskkill. Used as an escalation step
+    when the backend's own stop/poweroff command hasn't actually gotten the VM to
+    stop within the allotted time. Targets only THIS VM's process by matching its
+    name/path in the process command line, not every VM under that backend.
+    nuclear=True additionally closes any GUI viewer/console window for this VM and
+    widens the match, for the final, most aggressive tier."""
     try:
         pattern = re.escape(vm_name)
         if backend == "vmware":
@@ -4521,6 +5078,24 @@ def _kill_backend_processes(vm_name, backend, nuclear=False):
             if nuclear:
                 subprocess.run(["pkill", "-9", "-f", f"VirtualBoxVM.*{pattern}"],
                                 capture_output=True, timeout=10)
+        elif backend == "libvirt":
+            # The underlying qemu process's command line includes -name guest=<vm>,...
+            # so this targets only this specific domain, not every VM on the host.
+            subprocess.run(["pkill", "-9", "-f", f"qemu.*guest={pattern}"],
+                            capture_output=True, timeout=10)
+            if nuclear:
+                subprocess.run(["pkill", "-9", "-f", f"virt-viewer.*{pattern}"],
+                                capture_output=True, timeout=10)
+                if shutil.which("xdotool"):
+                    try:
+                        search = subprocess.run(["xdotool", "search", "--name", vm_name],
+                                                 capture_output=True, text=True, timeout=10)
+                        for wid in search.stdout.strip().splitlines():
+                            if wid:
+                                subprocess.run(["xdotool", "windowkill", wid],
+                                                capture_output=True, timeout=5)
+                    except Exception:
+                        pass
     except Exception as e:
         print(f'[Poweroff] Process-kill error: Python exception: "{traceback.format_exc()}"')
 
@@ -4533,7 +5108,7 @@ def robust_vm_poweroff(vm_name, backend, source="Poweroff"):
       2. If still running, does a force poweroff (hard stop) AND kills the specific
          backend process for this VM, then polls for up to another 15s.
       3. If STILL running, does a final nuclear pass: kills every related process for
-         this VM more broadly.
+         this VM more broadly and closes any GUI viewer/console window too.
     Returns True once the VM is confirmed stopped (or was never running to begin
     with), False if even the nuclear tier didn't get it to stop."""
     if not vm_name:
@@ -4573,7 +5148,7 @@ def robust_vm_poweroff(vm_name, backend, source="Poweroff"):
         print(f"[{source}] '{vm_name}' confirmed stopped after force poweroff.")
         return True
 
-    # Tier 3: nuclear -- kill everything related to this VM
+    # Tier 3: nuclear -- kill everything related to this VM, including any window
     print(f"[{source}] '{vm_name}' still running after force poweroff -- nuclear kill.")
     _kill_backend_processes(vm_name, backend, nuclear=True)
     if _confirm_stopped(10):
@@ -4636,6 +5211,8 @@ def switch_os(target_entry, announce=True):
             VMX_PATH = target_vm
             current_vm_backend = target_backend  # every subsequent VM-lifecycle command
                                                   # now follows this OS's backend
+            save_autostart_everything_config(backend=current_vm_backend, vm=VMX_PATH,
+                                              os_voting_vm=target_vm, os_voting_backend=target_backend)
             update_status(f"Running {target_name}")
             play_success_sound()
             play_event_sound("os_switch_sound")
@@ -4672,7 +5249,7 @@ def switch_os(target_entry, announce=True):
                 else:
                     log_error("OSVoting", f"Fallback also failed for '{previous_vm}'", str(err2))
                     notify("Critical: No VM Running",
-                           "Both the target and previous OS failed to start. Check VMware Workstation / VirtualBox.",
+                           "Both the target and previous OS failed to start. Check VMware Workstation / VirtualBox / virt-manager.",
                            timeout=10)
                     update_status("ERROR: no VM running")
             else:
@@ -4818,14 +5395,16 @@ def _play_chime(note_freqs, note_duration=0.12, sample_rate=44100, volume=0.25):
     except Exception as e:
         print(f"[Splash] Could not play chime: {e}")
 
-
 def send_keyboard(text):
+    """Types a string of text into the VM's console -- QMP for libvirt, VNC for
+    VMware/VBox (unchanged)."""
     risky, reason = ai_check_risk(text, kind="text")
     if risky:
         console_log("WARN", f'[Gemini] Blocked typed text: "{text}" -- {reason}')
         notify("Text Command Blocked", f"Gemini flagged a possible copyright risk: {reason}", timeout=8)
         return
-    """Types a string of text into the VM's console over VNC."""
+    if current_vm_backend == "libvirt":
+        return qemu_send_keyboard(text)
     with _vnc_lock:
         client = vnc_connect_fresh()
         if not client:
@@ -4851,7 +5430,10 @@ def send_keyboard(text):
             _vnc_clear_stuck_modifiers(client)
 
 def send_scancode(key_name):
-    """Presses and releases a single named key over VNC (replaces raw PS/2 scancodes)."""
+    """Presses and releases a single named key -- QMP for libvirt, VNC for
+    VMware/VBox."""
+    if current_vm_backend == "libvirt":
+        return qemu_send_scancode(key_name)
     mapped = SCANCODES.get(key_name, key_name)
     with _vnc_lock:
         client = vnc_connect_fresh()
@@ -4874,6 +5456,11 @@ def play_success_sound():
         print(f'[Sound] Error: Python exception: "{traceback.format_exc()}"')
 
 def start_vm():
+    if not VMX_PATH:
+        update_status("No VM selected")
+        print("[VM] Start failed: no VM is currently selected. Go to the Main tab, "
+              "pick a Backend, and select a VM before starting.")
+        return
     try:
         update_status("Starting...")
         obs_trigger("vm_starting")
@@ -4883,26 +5470,142 @@ def start_vm():
         apply_current_os_scene()
         print(f"[VM] Started! (backend: {current_vm_backend})")
     except Exception as e:
-        update_status("VM is already running!")
-        print(f'[VM] Already running: Python exception: "{traceback.format_exc()}"')
+        # Don't assume "already running" -- that's a VMware-specific guess (vmrun start
+        # commonly fails that way) that doesn't hold for libvirt/VBox, where a start
+        # failure could just as easily mean a permission error, a connection issue, or
+        # the VM name not being found. Show what actually happened instead of a
+        # potentially-wrong assumption that hides the real cause.
+        update_status("VM start failed")
+        print(f'[VM] Start failed: Python exception: "{traceback.format_exc()}"')
 
 def restore_window():
-    """Brings the VMware Workstation console window to the front.
+    """Brings the VM's console/viewer window to the front.
 
-    vmrun has no "show window" command, so this is done by re-issuing the
-    start command with the gui flag, which VMware Workstation treats as a
-    request to raise the existing console window rather than an error.
+    VMware: vmrun has no "show window" command, so this is done by re-issuing the
+    start command with the gui flag, which VMware Workstation treats as a request to
+    raise the existing console window rather than an error.
+
+    Libvirt: virsh has no equivalent trick at all -- it doesn't manage GUI windows,
+    that's the job of a separate viewer application (virt-manager/virt-viewer) that
+    the user runs independently. Re-issuing "virsh start" on an already-running VM
+    just errors out and does nothing useful. Uses xdotool to find and activate that
+    viewer window by title instead (virt-manager's console windows are titled
+    "<vm-name> on QEMU/KVM").
     """
+    if current_vm_backend == "libvirt":
+        try:
+            import shutil as _shutil
+            if not _shutil.which("xdotool"):
+                print("[VM] Restore: xdotool not found -- install it (e.g. `sudo apt install "
+                      "xdotool`) to bring the virt-manager/virt-viewer window to front.")
+                return
+            search = subprocess.run(["xdotool", "search", "--name", VMX_PATH],
+                                     capture_output=True, text=True, timeout=10)
+            window_ids = [w for w in search.stdout.strip().splitlines() if w]
+            if not window_ids:
+                print(f"[VM] Restore: no window found matching '{VMX_PATH}' -- is a "
+                      f"virt-manager/virt-viewer console open for it?")
+                return
+            subprocess.run(["xdotool", "windowactivate", window_ids[0]], capture_output=True, timeout=10)
+            print("[VM] Window brought to front!")
+        except Exception as e:
+            print(f'[VM] Restore error: Python exception: "{traceback.format_exc()}"')
+        return
     try:
         _checked(vm_start(VMX_PATH, current_vm_backend, gui=True))
         print("[VM] Window brought to front!")
     except Exception:
         print("[VM] Restore: Not working in headless mode!")
 
+def _handle_mouse_qemu(cmd, args):
+    """QMP mouse handling for the libvirt backend -- mirrors handle_mouse()'s exact
+    command parsing (move directions, abs, click variants, drag, scroll) but drives
+    _qemu_cursor and the qemu_mouse_*() QMP functions instead of a VNC client."""
+    try:
+        parts = args.split()
+
+        def _move_to(x, y):
+            qemu_mouse_move(x, y)
+
+        def _press(button, count=1):
+            qemu_mouse_click(button, count)
+
+        def _is_int(s):
+            s = s.strip()
+            return s.lstrip('-').isdigit()
+
+        _DIRS = {'left': (-1, 0), 'right': (1, 0), 'up': (0, -1), 'down': (0, 1)}
+
+        if cmd in ['move', 'mouse', 'mv', 'm']:
+            if len(parts) == 2:
+                p0, p1 = parts[0].lower(), parts[1].lower()
+                if p0 in _DIRS and _is_int(p1):
+                    ux, uy = _DIRS[p0]; amt = int(p1)
+                    _move_to(_qemu_cursor["x"] + ux * amt, _qemu_cursor["y"] + uy * amt)
+                elif p1 in _DIRS and _is_int(p0):
+                    ux, uy = _DIRS[p1]; amt = int(p0)
+                    _move_to(_qemu_cursor["x"] + ux * amt, _qemu_cursor["y"] + uy * amt)
+                elif _is_int(p0) and _is_int(p1):
+                    _move_to(_qemu_cursor["x"] + int(p0), _qemu_cursor["y"] + int(p1))
+            elif len(parts) == 1 and parts[0].lower() in _DIRS:
+                ux, uy = _DIRS[parts[0].lower()]
+                _move_to(_qemu_cursor["x"] + ux * 20, _qemu_cursor["y"] + uy * 20)
+        elif cmd in ['abs', 'cursor', 'moveabs']:
+            if len(parts) == 2:
+                _move_to(int(parts[0]), int(parts[1]))
+        elif cmd in ['click', 'lclick', 'lc']:
+            count = int(args) if args.isdigit() else 1
+            _press(1, count)
+        elif cmd in ['dclick']:
+            _press(1, 2)
+        elif cmd in ['tripleclick']:
+            _press(1, 3)
+        elif cmd in ['rclick', 'rightclick', 'rc']:
+            count = int(args) if args.isdigit() else 1
+            _press(3, count)
+        elif cmd in ['mclick', 'middleclick']:
+            count = int(args) if args.isdigit() else 1
+            _press(2, count)
+        elif cmd in ['drag', 'dragrel', 'd']:
+            if len(parts) >= 2:
+                dx, dy = int(parts[-2]), int(parts[-1])
+                qemu_mouse_drag(_qemu_cursor["x"] + dx, _qemu_cursor["y"] + dy)
+        elif cmd in ['dragabs', 'drag_absolute']:
+            if len(parts) >= 2:
+                x, y = int(parts[-2]), int(parts[-1])
+                qemu_mouse_drag(x, y)
+        elif cmd in ['scroll', 'wheel']:
+            dz = int(args) if args else 0
+            button = 4 if dz > 0 else 5  # 4 = scroll up, 5 = scroll down
+            for _ in range(abs(dz)):
+                qemu_mouse_button(button, True)
+                time.sleep(0.01)
+                qemu_mouse_button(button, False)
+                time.sleep(0.01)
+        elif cmd == 'scrollup':
+            amt = int(args) if args.strip().isdigit() else 3
+            for _ in range(amt):
+                qemu_mouse_button(4, True)
+                time.sleep(0.01)
+                qemu_mouse_button(4, False)
+                time.sleep(0.01)
+        elif cmd == 'scrolldown':
+            amt = int(args) if args.strip().isdigit() else 3
+            for _ in range(amt):
+                qemu_mouse_button(5, True)
+                time.sleep(0.01)
+                qemu_mouse_button(5, False)
+                time.sleep(0.01)
+        print(f"[Mouse/QMP] {cmd} {args}")
+    except Exception as e:
+        print(f'[Mouse/QMP] Error: Python exception: "{traceback.format_exc()}"')
+
 _MOUSE_CLICK_COMMANDS = {"click", "lclick", "lc", "rclick", "rightclick", "rc",
                          "mclick", "middleclick", "dclick", "tripleclick"}
 
 def handle_mouse(cmd, args):
+    """Mouse control -- QMP for libvirt, VNC for VMware/VBox (VMware Workstation
+    exposes a VNC server per-VM)."""
     action_desc = f"[mouse {cmd} {args}]".strip()
     if cmd in _MOUSE_CLICK_COMMANDS:
         # Only click-type commands actually trigger a full AI check -- a click is
@@ -4918,7 +5621,8 @@ def handle_mouse(cmd, args):
             return
     else:
         _record_and_get_recent_text_context(action_desc)   # record only, no API call
-    """Mouse control over VNC (VMware Workstation exposes a VNC server per-VM)."""
+    if current_vm_backend == "libvirt":
+        return _handle_mouse_qemu(cmd, args)
     global _vnc_cursor
     with _vnc_lock:
         client = vnc_connect_fresh()
@@ -5179,8 +5883,10 @@ def watchdog_restart():
                         speak_text("Running")
                     else:
                         log_error("Watchdog", f"Failed to auto-restart VM after 3 attempts", str(err))
+                        backend_hint = {"vbox": "VirtualBox", "libvirt": "virt-manager/virsh"}.get(
+                            current_vm_backend, "VMware Workstation")
                         notify("Watchdog: VM Start Failed",
-                               "Could not restart the VM after 3 attempts. Check VMware Workstation.",
+                               f"Could not restart the VM after 3 attempts. Check {backend_hint}.",
                                timeout=10)
                         update_status("ERROR: VM failed to start")
             else:
@@ -5225,7 +5931,6 @@ def load_fun_high_scores():
 def save_fun_high_scores():
     safe_json_dump(fun_high_scores_file, fun_high_scores)
     print(f"[FunTab] High scores saved: {fun_high_scores}")
-
 
 # ---------------- Music panel (yt-dlp + python-vlc) ----------------
 MUSIC_SCHEDULE_MAX = 20
@@ -5313,13 +6018,30 @@ def _music_resolve_stream(url):
         console_log("ERROR", f'[music] yt-dlp resolve failed for {url}: Python exception: "{traceback.format_exc()}"')
         return None, None, None
 
+def _vlc_diagnose_init_failure(exc):
+    """python-vlc (the pip package) is just a ctypes wrapper -- it still needs the
+    actual VLC application installed separately to provide the native libvlc shared
+    library it calls into. The single most common failure here is having the Python
+    bindings installed with no VLC application on the system at all, which surfaces
+    as a deeply-nested NameError several layers down in vlc.py's own ctypes lookup
+    code, with nothing in the message itself pointing at the real, simple cause."""
+    if isinstance(exc, NameError) and "libvlc" in str(exc):
+        return ("VLC application not found (the Python 'vlc' package is installed, but "
+                "the actual VLC media player isn't). Install it with: "
+                "sudo apt install vlc   (Debian/Ubuntu) -- then restart the bot.")
+    return None
+
 def _music_get_vlc_instance():
     global music_player
     if not vlc_available: return None
     if music_player is None:
         try: music_player = _vlc.Instance("--no-video", "--quiet", "--aout=any")
         except Exception as e:
-            console_log("ERROR", f'[music] vlc init failed: Python exception: "{traceback.format_exc()}"')
+            diagnosis = _vlc_diagnose_init_failure(e)
+            if diagnosis:
+                console_log("ERROR", f"[music] vlc init failed: {diagnosis}")
+            else:
+                console_log("ERROR", f'[music] vlc init failed: Python exception: "{traceback.format_exc()}"')
             return None
     return music_player
 
@@ -5646,7 +6368,11 @@ def _video_get_vlc_instance():
     if video_player is None:
         try: video_player = _vlc.Instance("--quiet")
         except Exception as e:
-            console_log("ERROR", f'[video] vlc init failed: Python exception: "{traceback.format_exc()}"')
+            diagnosis = _vlc_diagnose_init_failure(e)
+            if diagnosis:
+                console_log("ERROR", f"[video] vlc init failed: {diagnosis}")
+            else:
+                console_log("ERROR", f'[video] vlc init failed: Python exception: "{traceback.format_exc()}"')
             return None
     return video_player
 
@@ -6263,6 +6989,9 @@ def vm_pause():
     if current_vm_backend == "vbox":
         return retry_vbox(lambda: _checked(subprocess.run([VBOXMANAGE_PATH, "controlvm", VMX_PATH, "pause"], capture_output=True, text=True)),
                            source="Cmd/pausevm")
+    elif current_vm_backend == "libvirt":
+        return retry_vbox(lambda: _checked(subprocess.run([VIRSH_PATH, "-c", LIBVIRT_URI, "suspend", VMX_PATH], capture_output=True, text=True)),
+                           source="Cmd/pausevm")
     return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'pause', VMX_PATH], check=True, timeout=20),
                        source="Cmd/pausevm")
 
@@ -6270,12 +6999,21 @@ def vm_unpause():
     if current_vm_backend == "vbox":
         return retry_vbox(lambda: _checked(subprocess.run([VBOXMANAGE_PATH, "controlvm", VMX_PATH, "resume"], capture_output=True, text=True)),
                            source="Cmd/resumevm")
+    elif current_vm_backend == "libvirt":
+        return retry_vbox(lambda: _checked(subprocess.run([VIRSH_PATH, "-c", LIBVIRT_URI, "resume", VMX_PATH], capture_output=True, text=True)),
+                           source="Cmd/resumevm")
     return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'unpause', VMX_PATH], check=True, timeout=20),
                        source="Cmd/resumevm")
 
 def vm_save_state():
     if current_vm_backend == "vbox":
         return retry_vbox(lambda: _checked(subprocess.run([VBOXMANAGE_PATH, "controlvm", VMX_PATH, "savestate"], capture_output=True, text=True)),
+                           source="Cmd/vmsavestate")
+    elif current_vm_backend == "libvirt":
+        # managedsave is virsh's closest equivalent to vmrun suspend/VBoxManage savestate --
+        # saves state to disk and stops the VM, resuming from that exact state on the next
+        # `virsh start` rather than a cold boot.
+        return retry_vbox(lambda: _checked(subprocess.run([VIRSH_PATH, "-c", LIBVIRT_URI, "managedsave", VMX_PATH], capture_output=True, text=True)),
                            source="Cmd/vmsavestate")
     return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'suspend', VMX_PATH], check=True, timeout=30),
                        source="Cmd/vmsavestate")
@@ -6291,6 +7029,17 @@ INTERNET_CONFIG = {"enabled": True}
 def save_internet_config():
     safe_json_dump(INTERNET_CONFIG_FILE, INTERNET_CONFIG)
 
+def _internet_toggle_label():
+    """Short, accurate description of what VM Internet actually toggles for the
+    current backend -- used in place of a hardcoded "VMware NAT Service" in UI/log
+    text, since that name is simply wrong for VBox/libvirt (which toggle the specific
+    VM's own network link directly, not a shared host service)."""
+    if current_vm_backend == "vbox":
+        return "VBox network adapter link"
+    elif current_vm_backend == "libvirt":
+        return "libvirt network interface link"
+    return "VMware NAT Service"
+
 def vm_set_internet_live(enabled, os_type=None, iface=None):
     """Toggles internet connectivity for the CURRENT vm. VMware: starts/stops the host's
     'VMware NAT Service' (host-wide -- affects every VMware VM using NAT, not just this
@@ -6303,6 +7052,15 @@ def vm_set_internet_live(enabled, os_type=None, iface=None):
             INTERNET_CONFIG["enabled"] = enabled
             save_internet_config()
             return res.returncode == 0, output.strip() or f"setlinkstate1 exited {res.returncode}"
+        except Exception as e:
+            return False, str(e)
+    elif current_vm_backend == "libvirt":
+        try:
+            res = libvirt_toggle_internet(VMX_PATH, enabled, VIRSH_PATH)
+            output = (res.stdout or "") + (res.stderr or "")
+            INTERNET_CONFIG["enabled"] = enabled
+            save_internet_config()
+            return res.returncode == 0, output.strip() or f"domif-setlink exited {res.returncode}"
         except Exception as e:
             return False, str(e)
     if platform.system() == "Darwin":
@@ -6348,6 +7106,45 @@ def vm_set_internet_live(enabled, os_type=None, iface=None):
         INTERNET_CONFIG["enabled"] = enabled
         save_internet_config()
         return result.returncode == 0, output.strip() or f"net {args[1]} exited {result.returncode}"
+    except Exception as e:
+        return False, str(e)
+
+def vm_set_internet_live_qemu(enabled):
+    """Explicit-backend internet toggle for !enableinternetqemu/!disableinternetqemu --
+    always uses libvirt's domif-setlink, regardless of which backend is currently
+    active. Unlike vm_set_internet_live (which follows current_vm_backend), this
+    validates current_vm_backend IS actually libvirt first, since calling
+    libvirt_toggle_internet with a VMware .vmx path or VBox VM name would be
+    meaningless -- a clear mismatch message here is far more useful than a confusing
+    failure deep inside libvirt_toggle_internet itself."""
+    if current_vm_backend != "libvirt":
+        return False, (f"current backend is '{current_vm_backend}', not libvirt -- "
+                        f"!enableinternetqemu/!disableinternetqemu only work while a "
+                        f"libvirt VM is active.")
+    try:
+        res = libvirt_toggle_internet(VMX_PATH, enabled, VIRSH_PATH)
+        output = (res.stdout or "") + (res.stderr or "")
+        INTERNET_CONFIG["enabled"] = enabled
+        save_internet_config()
+        return res.returncode == 0, output.strip() or f"domif-setlink exited {res.returncode}"
+    except Exception as e:
+        return False, str(e)
+
+def vm_set_internet_live_vbox(enabled):
+    """Explicit-backend internet toggle for !enableinternetvbox/!disableinternetvbox --
+    always uses VBoxManage's controlvm ... setlinkstate1, regardless of which backend
+    is currently active. Same validate-first reasoning as vm_set_internet_live_qemu
+    above, just for VBox instead."""
+    if current_vm_backend != "vbox":
+        return False, (f"current backend is '{current_vm_backend}', not vbox -- "
+                        f"!enableinternetvbox/!disableinternetvbox only work while a "
+                        f"VBox VM is active.")
+    try:
+        res = vbox_toggle_internet(VMX_PATH, enabled, VBOXMANAGE_PATH)
+        output = (res.stdout or "") + (res.stderr or "")
+        INTERNET_CONFIG["enabled"] = enabled
+        save_internet_config()
+        return res.returncode == 0, output.strip() or f"setlinkstate1 exited {res.returncode}"
     except Exception as e:
         return False, str(e)
 
@@ -7025,6 +7822,30 @@ class YouTubeChatBot:
                                     post_system_message(f"[disableinternet] {msg}")
                                 else:
                                     post_system_message(f"[disableinternet] {user}: moderator only.")
+                            elif cmd == 'enableinternetqemu':
+                                if is_mod:
+                                    ok, msg = vm_set_internet_live_qemu(True)
+                                    post_system_message(f"[enableinternetqemu] {msg}")
+                                else:
+                                    post_system_message(f"[enableinternetqemu] {user}: moderator only.")
+                            elif cmd == 'disableinternetqemu':
+                                if is_mod:
+                                    ok, msg = vm_set_internet_live_qemu(False)
+                                    post_system_message(f"[disableinternetqemu] {msg}")
+                                else:
+                                    post_system_message(f"[disableinternetqemu] {user}: moderator only.")
+                            elif cmd == 'enableinternetvbox':
+                                if is_mod:
+                                    ok, msg = vm_set_internet_live_vbox(True)
+                                    post_system_message(f"[enableinternetvbox] {msg}")
+                                else:
+                                    post_system_message(f"[enableinternetvbox] {user}: moderator only.")
+                            elif cmd == 'disableinternetvbox':
+                                if is_mod:
+                                    ok, msg = vm_set_internet_live_vbox(False)
+                                    post_system_message(f"[disableinternetvbox] {msg}")
+                                else:
+                                    post_system_message(f"[disableinternetvbox] {user}: moderator only.")
                             # ── Fun / chaos ──
                             elif cmd == 'roll':
                                 post_system_message(f"[roll] {user} rolled {random.randint(1, 100)}")
@@ -7714,7 +8535,7 @@ class UltraBotGUI:
         # music_config.json/video_config.json (all loaded earlier, before _build_ui()) are the
         # authoritative source actually applied to the GUI/behavior. These are only
         # saved in this file for visibility alongside everything else restored here.
-        if saved_backend in ("vmware", "vbox"):
+        if saved_backend in ("vmware", "vbox", "libvirt"):
             self._vm_backend_var.set(saved_backend)
             current_vm_backend = saved_backend
             self._on_vm_backend_changed()   # repopulates the VM dropdown for this backend
@@ -7736,7 +8557,7 @@ class UltraBotGUI:
             if saved_osv_vm in valid_vms:
                 current_os_vm = saved_osv_vm
                 VMX_PATH = saved_osv_vm
-                if saved_osv_backend in ("vmware", "vbox"):
+                if saved_osv_backend in ("vmware", "vbox", "libvirt"):
                     current_vm_backend = saved_osv_backend
                 self._log(f"[AutostartEverything] Restored OS Voting VM: {saved_osv_vm} "
                           f"(backend: {saved_osv_backend or current_vm_backend})")
@@ -7749,7 +8570,6 @@ class UltraBotGUI:
             # otherwise _on_test_mode_toggle()'s own validation would just reject it.
             self._test_mode_var.set(True)
             self.root.after(500, self._on_test_mode_toggle)
-
 
     # ── TTK Styles ──
     def _make_context_menu(self, widget, is_text=False):
@@ -8032,6 +8852,20 @@ class UltraBotGUI:
 
         nb.bind("<<NotebookTabChanged>>", _on_tab_changed)
 
+    def _load_last_video_id(self):
+        """Reads the last-saved video ID from video_id.json, if any, purely to
+        pre-fill the Video ID field on launch -- this is independent of whether
+        autostart-everything actually connects and starts the bot; it just saves
+        having to re-paste the same ID before manually clicking Start Bot."""
+        try:
+            vid_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "video_id.json")
+            if os.path.exists(vid_path):
+                with open(vid_path, "r", encoding="utf-8") as f:
+                    return json.load(f).get("video_id", "")
+        except Exception as e:
+            print(f'[VideoID] Could not load video_id.json: Python exception: "{traceback.format_exc()}"')
+        return ""
+
     def _make_scrollable_tab(self, notebook):
         """Wraps a new notebook tab in a vertically-scrollable container (Canvas + inner
         Frame + Scrollbar) and returns (outer_frame_for_notebook, inner_frame_to_populate).
@@ -8127,7 +8961,7 @@ class UltraBotGUI:
         tk.Label(card, text="YouTube Video ID", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
                  row=0, column=0, sticky="w", padx=(0,8))
-        self._yt_var = tk.StringVar()
+        self._yt_var = tk.StringVar(value=self._load_last_video_id())
         yt_entry = ttk.Entry(card, textvariable=self._yt_var, width=32,
                              font=("Segoe UI Mono", 10))
         yt_entry.grid(row=0, column=1, sticky="ew", padx=(0,12), ipady=4)
@@ -8141,10 +8975,12 @@ class UltraBotGUI:
         self._vm_backend_var = tk.StringVar(value="vmware")
         backend_radio_frame = tk.Frame(card, bg=self.BG2)
         backend_radio_frame.grid(row=1, column=1, sticky="w", pady=(10,0))
-        ttk.Radiobutton(backend_radio_frame, text="VMware", variable=self._vm_backend_var,
-                        value="vmware", command=lambda: self._on_vm_backend_changed()).pack(side="left", padx=(0,12))
-        ttk.Radiobutton(backend_radio_frame, text="VBox", variable=self._vm_backend_var,
-                        value="vbox", command=lambda: self._on_vm_backend_changed()).pack(side="left")
+        self._backend_radios = []
+        for label, value in (("VMware", "vmware"), ("VBox", "vbox"), ("Libvirt", "libvirt")):
+            rb = ttk.Radiobutton(backend_radio_frame, text=label, variable=self._vm_backend_var,
+                                  value=value, command=lambda: self._on_vm_backend_changed())
+            rb.pack(side="left", padx=(0,12))
+            self._backend_radios.append(rb)
 
         # VM selector
         self._vm_field_label = tk.Label(card, text="VMware .vmx Path", bg=self.BG2,
@@ -8185,6 +9021,10 @@ class UltraBotGUI:
         self._on_vm_backend_changed()  # populate the combo for the initial "vmware" selection
 
         # Auto-start watchdog toggle
+        # row=4 here, NOT row=3 -- row=3 is self._vm_select_note above (columnspan=3,
+        # normally blank text but populated when OS Voting is enabled), and this used
+        # to sit directly on top of that same row, invisibly colliding until OS Voting
+        # actually had text to show, at which point both became garbled together.
         tk.Label(card, text="Auto-Start Watchdog", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
                  row=4, column=0, sticky="w", padx=(0,8), pady=(10,0))
@@ -8251,10 +9091,20 @@ class UltraBotGUI:
                    command=self._send_admin_cmd).pack(side="left")
 
         # ── Bottom pane: Live Chat Viewer | Console Output ──
+        # Explicit height is required here, not just fill="both"/expand=True -- this
+        # tab's parent is now the inner frame of a scrollable Canvas (see
+        # _make_scrollable_tab), and a canvas window item sizes to its content's own
+        # natural height rather than "whatever's left in the visible area" the way a
+        # normal container would. Without a fixed height, expand=True has nothing
+        # meaningful to expand into and this pane can collapse to a barely-visible
+        # sliver -- text still gets written to it correctly, it just isn't visible at
+        # a usable size. If the tab's content runs taller than the window as a result,
+        # that's fine -- scrolling to reach it is exactly what that wrapper is for.
         bottom_pane = tk.PanedWindow(parent, orient="horizontal",
                                      bg=self.BORDER, sashwidth=5,
-                                     sashrelief="flat", bd=0)
+                                     sashrelief="flat", bd=0, height=420)
         bottom_pane.pack(fill="both", expand=True, padx=12, pady=(2, 0))
+        bottom_pane.pack_propagate(False)
 
         # Left: Live Chat Viewer
         chat_outer = tk.Frame(bottom_pane, bg=self.BG)
@@ -8384,8 +9234,9 @@ class UltraBotGUI:
 
         pane = tk.PanedWindow(parent, orient="horizontal",
                               bg=self.BG, sashwidth=6,
-                              sashrelief="flat", bd=0)
+                              sashrelief="flat", bd=0, height=560)
         pane.pack(fill="both", expand=True, padx=8, pady=8)
+        pane.pack_propagate(False)
 
         # ── Left panel: command list ──
         left = ttk.Frame(pane, style="Card.TFrame", padding=8)
@@ -8608,8 +9459,10 @@ class UltraBotGUI:
         tk.Label(net_card, text="VM Internet", bg=self.BG2, fg=self.TEXT,
                  font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         tk.Label(net_card,
-                 text="Cuts or restores internet for every VM on NAT by stopping/starting the "
-                      "host's 'VMware NAT Service' (net stop / net start). Live, instant, no VM "
+                 text="Cuts or restores internet for the current VM's network connection. "
+                      "For VMware this stops/starts the shared host 'VMware NAT Service' "
+                      "(affects every VMware VM on NAT, not just this one); for VBox/libvirt "
+                      "this toggles only this VM's own network link. Live, instant, no VM "
                       "restart required.",
                  bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 8),
                  wraplength=420, justify="left").grid(row=1, column=0, sticky="w", pady=(4, 12))
@@ -8617,16 +9470,46 @@ class UltraBotGUI:
         ttk.Button(net_card, text="🌐 Toggle Internet", style="Accent.TButton",
                    command=self._vm_toggle_internet).grid(row=2, column=0, sticky="w")
 
+        # Explicit-backend buttons -- unlike the generic Toggle Internet button above
+        # (which follows whatever backend is currently active), these always target a
+        # specific backend, so they're only meaningful while a VM on that exact
+        # backend is the one active (each button's own handler validates this and
+        # reports a clear mismatch message rather than a confusing failure otherwise).
+        backend_net_row = tk.Frame(net_card, bg=self.BG2)
+        backend_net_row.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Button(backend_net_row, text="Enable (QEMU/libvirt)", style="Green.TButton",
+                   command=lambda: self._vm_toggle_internet_backend("qemu", True)).pack(side="left", padx=(0, 6))
+        ttk.Button(backend_net_row, text="Disable (QEMU/libvirt)", style="Red.TButton",
+                   command=lambda: self._vm_toggle_internet_backend("qemu", False)).pack(side="left", padx=(0, 16))
+        ttk.Button(backend_net_row, text="Enable (VBox)", style="Green.TButton",
+                   command=lambda: self._vm_toggle_internet_backend("vbox", True)).pack(side="left", padx=(0, 6))
+        ttk.Button(backend_net_row, text="Disable (VBox)", style="Red.TButton",
+                   command=lambda: self._vm_toggle_internet_backend("vbox", False)).pack(side="left")
+
         self._internet_status_lbl = tk.Label(net_card, text="", bg=self.BG2, fg=self.TEXTDIM,
                                               font=("Segoe UI", 8, "italic"))
-        self._internet_status_lbl.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        self._internet_status_lbl.grid(row=5, column=0, sticky="w", pady=(10, 0))
         self._vm_refresh_internet_status()
+
+    def _vm_toggle_internet_backend(self, backend, enable):
+        """Handler for the explicit-backend Enable/Disable (QEMU/libvirt or VBox)
+        buttons -- backend is "qemu" or "vbox", matching the !enableinternetqemu/
+        !enableinternetvbox chat command naming."""
+        fn = vm_set_internet_live_qemu if backend == "qemu" else vm_set_internet_live_vbox
+        label = "QEMU/libvirt" if backend == "qemu" else "VBox"
+
+        def _run():
+            ok, msg = fn(enable)
+            self.root.after(0, lambda: self._log(
+                f"[VM Internet] {'enabled' if enable else 'disabled'} via {label}: {msg}"))
+            self.root.after(0, self._vm_refresh_internet_status)
+        threading.Thread(target=_run, daemon=True).start()
 
     def _vm_refresh_internet_status(self):
         try:
             state = INTERNET_CONFIG.get("enabled", True)
             self._internet_status_lbl.configure(
-                text=f"VMware NAT Service: {'RUNNING (internet enabled)' if state else 'STOPPED (internet disabled)'}.")
+                text=f"{_internet_toggle_label()}: {'RUNNING (internet enabled)' if state else 'STOPPED (internet disabled)'}.")
         except Exception:
             pass
 
@@ -8636,7 +9519,7 @@ class UltraBotGUI:
         def _run():
             ok, msg = vm_set_internet_live(new_state)
             self.root.after(0, lambda: self._log(
-                f"[VM Internet] {'started' if new_state else 'stopped'} VMware NAT Service: {msg}"))
+                f"[VM Internet] {'started' if new_state else 'stopped'} {_internet_toggle_label()}: {msg}"))
             self.root.after(0, self._vm_refresh_internet_status)
         threading.Thread(target=_run, daemon=True).start()
 
@@ -8682,8 +9565,10 @@ class UltraBotGUI:
                  font=("Segoe UI", 9, "bold"), width=18, anchor="w").grid(row=0, column=1, padx=4)
         tk.Label(col_hdr, text="Chat Trigger", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 9, "bold"), width=14, anchor="w").grid(row=0, column=2, padx=4)
-        tk.Label(col_hdr, text="VMware .vmx Path", bg=self.BG2, fg=self.TEXTDIM,
-                 font=("Segoe UI", 9, "bold"), width=24, anchor="w").grid(row=0, column=3, padx=4)
+        tk.Label(col_hdr, text="Backend", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold"), width=8, anchor="w").grid(row=0, column=3, padx=4)
+        tk.Label(col_hdr, text="VM (backend-specific)", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold"), width=24, anchor="w").grid(row=0, column=4, padx=4)
 
         # Canvas + scrollbar for the rows
         scroll_container = tk.Frame(self._os_rows_card, bg=self.BG2)
@@ -8765,9 +9650,16 @@ class UltraBotGUI:
 
         backend_var = tk.StringVar(value=entry.get("backend", "vmware"))
         backend_combo = ttk.Combobox(row, textvariable=backend_var, width=8, state="readonly",
-                                      values=["vmware", "vbox"], font=("Segoe UI", 9))
+                                      values=["vmware", "vbox", "libvirt"], font=("Segoe UI", 9))
         backend_combo.grid(row=0, column=3, padx=4, ipady=3)
         self._os_backend_vars.append(backend_var)
+
+        def _vms_for_backend(b):
+            if b == "vbox":
+                return get_all_vbox_vms()
+            elif b == "libvirt":
+                return get_all_libvirt_vms()
+            return get_vm_list()
 
         vm_var = tk.StringVar(value=entry.get("vm", ""))
         vm_combo = ttk.Combobox(row, textvariable=vm_var, width=24,
@@ -8775,10 +9667,10 @@ class UltraBotGUI:
                                  font=("Segoe UI", 9))
         vm_combo.grid(row=0, column=4, padx=4, ipady=3)
         vm_combo.bind("<MouseWheel>", self._os_voting_wheel_fn)
-        vm_combo['values'] = get_vm_list() if backend_var.get() == "vmware" else get_all_vbox_vms()
+        vm_combo['values'] = _vms_for_backend(backend_var.get())
 
         def _on_row_backend_changed(event=None, backend_var=backend_var, vm_combo=vm_combo):
-            new_vms = get_vm_list() if backend_var.get() == "vmware" else get_all_vbox_vms()
+            new_vms = _vms_for_backend(backend_var.get())
             vm_combo['values'] = new_vms
             if new_vms: vm_combo.set(new_vms[0])
         backend_combo.bind("<<ComboboxSelected>>", _on_row_backend_changed)
@@ -8796,13 +9688,19 @@ class UltraBotGUI:
         self._log("[OSVoting] Added a new VM row.")
 
     def _refresh_os_vm_lists(self):
-        vms = get_vm_list()
-        for combo in self._os_vm_combos:
+        vmware_vms  = get_vm_list()
+        vbox_vms    = get_all_vbox_vms()
+        libvirt_vms = get_all_libvirt_vms()
+        total = 0
+        for i, combo in enumerate(self._os_vm_combos):
+            backend = self._os_backend_vars[i].get() if i < len(self._os_backend_vars) else "vmware"
+            vms = vbox_vms if backend == "vbox" else libvirt_vms if backend == "libvirt" else vmware_vms
+            total += len(vms)
             current = combo.get()
             combo['values'] = vms
             if current and current in vms:
                 combo.set(current)
-        self._log(f"[OSVoting] VM list refreshed ({len(vms)} found).")
+        self._log(f"[OSVoting] VM list refreshed ({total} found).")
 
     def _set_os_rows_enabled(self, enabled):
         state = "readonly" if enabled else "disabled"
@@ -9394,15 +10292,21 @@ class UltraBotGUI:
         self._log(f"[AutoStart] Watchdog {'enabled' if AUTO_START_ENABLED else 'disabled'} by user.")
 
     def _sync_main_vm_lock(self):
-        """Lock the Main tab VM selector when OS Voting is enabled, since the
-        bot then uses the OS Voting tab's list instead."""
+        """Lock the Main tab VM selector AND Backend radio buttons when OS Voting is
+        enabled, since the bot then uses each OS Voting row's own backend+VM instead
+        of this single selection -- leaving the radios clickable while they have no
+        effect would be misleading."""
         if OS_VOTING_ENABLED:
             self._vm_combo.configure(state="disabled")
+            for rb in self._backend_radios:
+                rb.configure(state="disabled")
             self._vm_select_note.configure(
                 text="🗳 OS Voting is enabled — this selector is ignored. "
                      "The bot uses the VMs configured in the 'OS Voting' tab.")
         else:
             self._vm_combo.configure(state="readonly")
+            for rb in self._backend_radios:
+                rb.configure(state="normal")
             self._vm_select_note.configure(text="")
 
     def _on_os_voting_toggle(self):
@@ -9591,16 +10495,26 @@ class UltraBotGUI:
     # ──────────────── VM List ────────────────
     def _on_vm_backend_changed(self):
         """Swaps the VM field's label and populates it from the right source
-        (registered .vmx paths vs live VBoxManage VM list) for whichever backend
-        is currently selected. Also saves the selection to autostarteverything.json
-        so it's remembered on the next launch/relaunch instead of silently
-        defaulting back to vmware every time."""
+        (registered .vmx paths vs live VBoxManage VM list vs live virsh VM list)
+        for whichever backend is currently selected.
+
+        Also syncs the global current_vm_backend immediately, right here -- this is
+        the actual fix for a recurring bug: several different entry points (Start Bot,
+        Test Mode, the Admin CMD box's !startvm) each independently needed to set this
+        global before calling any VM command, and it kept being missed in whichever
+        entry point hadn't been audited yet. Setting it here instead, at the single
+        point where the user's selection actually changes, means it's always correct
+        by the time ANY of those entry points runs, without each of them needing their
+        own copy of this logic."""
         global current_vm_backend
         backend = self._vm_backend_var.get()
         current_vm_backend = backend
         if backend == "vbox":
             self._vm_field_label.configure(text="VBox VM Name")
             vms = get_all_vbox_vms()
+        elif backend == "libvirt":
+            self._vm_field_label.configure(text="Libvirt VM Name")
+            vms = get_all_libvirt_vms()
         else:
             self._vm_field_label.configure(text="VMware .vmx Path")
             vms = get_vm_list()
@@ -9611,13 +10525,19 @@ class UltraBotGUI:
 
     def _refresh_vm_list(self):
         backend = self._vm_backend_var.get() if hasattr(self, "_vm_backend_var") else "vmware"
-        vms = get_all_vbox_vms() if backend == "vbox" else get_vm_list()
+        if backend == "vbox":
+            vms = get_all_vbox_vms()
+        elif backend == "libvirt":
+            vms = get_all_libvirt_vms()
+        else:
+            vms = get_vm_list()
         self._vm_combo['values'] = vms
         if vms:
             self._vm_combo.current(0)
             self._log(f"{backend}: {len(vms)} VM(s) found.")
         else:
-            self._log("⚠️ No VMs registered (add a .vmx path first)")
+            self._log("⚠️ No VMs registered (add a .vmx path first)" if backend == "vmware"
+                       else f"⚠️ No {backend} VMs found.")
 
     def _add_vm_entry(self):
         alias = self._reg_alias_var.get().strip().lower()
@@ -9658,11 +10578,11 @@ class UltraBotGUI:
                 self._test_mode_var.set(False)
                 TEST_MODE_ENABLED = False
                 return
-            # Set VM target AND backend -- current_vm_backend was never set here at
-            # all before, so regardless of what the user picked in the GUI, it
-            # silently stayed at whatever it was before (the module-level default
-            # "vmware"), meaning every VM command in Test Mode could dispatch to
-            # the wrong tool entirely.
+            # Set VM target AND backend -- this was the actual bug: current_vm_backend
+            # was never set here at all, so regardless of what the user picked in the
+            # GUI (VMware/VBox/Libvirt), it silently stayed at whatever it was before
+            # (the module-level default "vmware"), meaning every VM command in Test
+            # Mode dispatched to the wrong tool entirely.
             if OS_VOTING_ENABLED:
                 valid = [e for e in OS_LIST if e.get("vm")]
                 if valid:
@@ -9900,6 +10820,18 @@ class UltraBotGUI:
             elif c == '!disableinternet':
                 ok, msg = vm_set_internet_live(False)
                 print(f"[Admin] disableinternet: {msg}")
+            elif c == '!enableinternetqemu':
+                ok, msg = vm_set_internet_live_qemu(True)
+                print(f"[Admin] enableinternetqemu: {msg}")
+            elif c == '!disableinternetqemu':
+                ok, msg = vm_set_internet_live_qemu(False)
+                print(f"[Admin] disableinternetqemu: {msg}")
+            elif c == '!enableinternetvbox':
+                ok, msg = vm_set_internet_live_vbox(True)
+                print(f"[Admin] enableinternetvbox: {msg}")
+            elif c == '!disableinternetvbox':
+                ok, msg = vm_set_internet_live_vbox(False)
+                print(f"[Admin] disableinternetvbox: {msg}")
             elif c == '!shutdown':
                 ok, msg = vm_shutdown_soft()
                 print(f"[Admin] shutdown: {msg}")
@@ -10110,8 +11042,9 @@ class UltraBotGUI:
                  font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
 
         pane = tk.PanedWindow(parent, orient="horizontal",
-                              bg=self.BORDER, sashwidth=4, sashrelief="flat")
+                              bg=self.BORDER, sashwidth=4, sashrelief="flat", height=520)
         pane.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+        pane.pack_propagate(False)
 
         # ───── LEFT: Banned users ─────
         left = ttk.Frame(pane, style="Card.TFrame", padding=10)
@@ -11102,8 +12035,9 @@ class UltraBotGUI:
         self._sched_update_status()
 
         pane = tk.PanedWindow(parent, orient="horizontal",
-                              bg=self.BORDER, sashwidth=4, sashrelief="flat")
+                              bg=self.BORDER, sashwidth=4, sashrelief="flat", height=460)
         pane.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        pane.pack_propagate(False)
 
         # Left: task list
         left = ttk.Frame(pane, style="Card.TFrame", padding=10)
@@ -12140,8 +13074,14 @@ class UltraBotGUI:
             self.music_volume_scale.pack(side="left", padx=(0, 10))
 
             # ---- main area: left = schedule column, right = 2 big boxes horizontally ----
-            main_area = tk.Frame(wrapper, bg="#09090B")
+            # Explicit height required -- this tab's parent is the inner frame of a
+            # scrollable Canvas, which doesn't constrain expand=True the way a normal
+            # container would (same root cause as the Console Output/Cmds/Users/
+            # Scheduler collapses fixed elsewhere). All the nested expand=True children
+            # below correctly divide up this real, fixed space once it exists.
+            main_area = tk.Frame(wrapper, bg="#09090B", height=520)
             main_area.pack(fill="both", expand=True)
+            main_area.pack_propagate(False)
 
             # -- LEFT: schedule column (upper + bottom boxes) --
             left_col = tk.Frame(main_area, bg="#18181B", width=300, highlightthickness=1, highlightbackground="#27272A")
@@ -12410,8 +13350,14 @@ class UltraBotGUI:
             self.video_volume_scale.pack(side="left", padx=(0, 10))
 
             # ---- main area: left = schedule column, right = 2 big boxes horizontally ----
-            main_area = tk.Frame(wrapper, bg="#09090B")
+            # Explicit height required -- this tab's parent is the inner frame of a
+            # scrollable Canvas, which doesn't constrain expand=True the way a normal
+            # container would (same root cause as the Console Output/Cmds/Users/
+            # Scheduler collapses fixed elsewhere). All the nested expand=True children
+            # below correctly divide up this real, fixed space once it exists.
+            main_area = tk.Frame(wrapper, bg="#09090B", height=520)
             main_area.pack(fill="both", expand=True)
+            main_area.pack_propagate(False)
 
             # -- LEFT: schedule column (upper + bottom boxes) --
             left_col = tk.Frame(main_area, bg="#18181B", width=300, highlightthickness=1, highlightbackground="#27272A")
@@ -12995,7 +13941,7 @@ class UltraBotGUI:
                 ("body", "1.  Paste your YouTube Video ID into the Main tab."),
                 ("body", "    e.g. if your URL is  youtube.com/watch?v=abc123XYZ  →  enter  abc123XYZ"),
                 ("code", "  YouTube Video ID  →  abc123XYZ"),
-                ("body", "2.  Pick your VMware VM from the dropdown (click 🔄 Refresh if it is empty)."),
+                ("body", "2.  Pick your VM from the dropdown (click 🔄 Refresh if it is empty). Choose the right Backend first -- VMware, VBox, or Libvirt."),
                 ("body", "3.  Click  ▶ Start Bot  — the bot connects to chat and starts listening."),
                 ("h2",   "Stopping the bot"),
                 ("body", "Press  ⏹ Stop Bot.  The VM keeps running; only the chat listener stops."),
@@ -13067,7 +14013,7 @@ class UltraBotGUI:
                 ("body", "Let your chat vote to switch between different operating systems live."),
                 ("h2",   "Setup"),
                 ("body", "1.  Go to the  OS Voting  tab and tick  Enable OS Voting."),
-                ("body", "2.  Fill in up to 15 rows: Display Name, Chat Trigger (no ! needed), VMware .vmx Path."),
+                ("body", "2.  Fill in up to 15 rows: Display Name, Chat Trigger (no ! needed), Backend (VMware/VBox/Libvirt), and the matching VM identifier."),
                 ("body", "3.  Click  💾 Save OS Voting Config."),
                 ("h2",   "How it works"),
                 ("body", "Viewers type e.g.  !win7.  When enough votes accumulate (default: 3), the bot powers off the current VM and boots the target one. Progress is shown on the overlay."),
@@ -13469,7 +14415,7 @@ class UltraBotGUI:
                 ("h1",   "🌍  VM Internet"),
                 ("body", "Cuts or restores internet access LIVE for every VM using NAT networking -- no VM restart required."),
                 ("h2",   "How it works"),
-                ("body", "Stops/starts the host's  'VMware NAT Service'  via  net stop  /  net start.  Since all NAT-networked VMs share this one host service, this affects every NAT VM at once, not just the currently selected one."),
+                ("body", "Toggles internet for the current VM. For VMware this stops/starts the host's shared 'VMware NAT Service' via  net stop  /  net start  (affects every NAT-networked VMware VM at once, not just the currently selected one). For VBox/libvirt this toggles only the current VM's own network link instead."),
                 ("h2",   "Using it"),
                 ("body", "Go to the  🖥 VM  tab and click  🌐 Toggle Internet,  or use the chat commands (moderator only):"),
                 ("code", "  !enableinternet"),
