@@ -1,5 +1,6 @@
 import subprocess
 import time
+import traceback
 import signal as _signal_module
 import threading as _threading_module
 import tkinter as tk
@@ -177,7 +178,7 @@ CURRENT_FILENAME = "YouTubeChatUsesVM-Linux-VBox.py"
 # Other Linux variants in this repo (for reference only -- deliberately NOT fetched or
 # checked by this script, only its OWN file above is ever downloaded/verified/replaced):
 #   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VMware.py
-#   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VBoxAndVMware.py
+#   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-Libvirt.py
 #   serves an HTML viewer page that urlopen() can't parse as source code.)
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
 GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-VBox.py"
@@ -242,7 +243,7 @@ def _check_for_update():
             version_filename = str(data.get("filename", "")).strip()
     except Exception as e:
         # Network unavailable or repo not configured — silently skip.
-        print(f"[Updater] Could not check for updates: {e}")
+        print(f'[Updater] Could not check for updates: Python exception: "{traceback.format_exc()}"')
         return False
 
     if version_filename and version_filename != CURRENT_FILENAME:
@@ -319,7 +320,7 @@ def _check_for_update():
             f"Update failed:\n{e}\n\nThe bot will start with the current version.",
             "Update Error"
         )
-        print(f"[Updater] Update failed: {e}")
+        print(f'[Updater] Update failed: Python exception: "{traceback.format_exc()}"')
         return False
 
 
@@ -343,23 +344,65 @@ AUTOUPDATE_POLL_INTERVAL = 1  # seconds -- checked with a conditional GET (ETag)
 _autoupdate_relaunch_triggered = False   # guards against triggering the pipeline twice
 _autoupdate_lock = _threading_module.Lock()
 
+import re as _re_early
+_AUTOSTART_SUFFIX_RE = _re_early.compile(r"_autostarteverything(\(\d+\)|_\d+)?$")
+
 def _script_paths():
     """(full script path, folder, base filename without .py)."""
     script_path = os.path.abspath(sys.argv[0])
     folder = os.path.dirname(script_path)
     base_name = os.path.splitext(os.path.basename(script_path))[0]
-    # If we're already running as a previously-generated "_autostarteverything" copy,
-    # strip that suffix so we don't end up with "..._autostarteverything_autostarteverything".
-    if base_name.endswith("_autostarteverything"):
-        base_name = base_name[:-len("_autostarteverything")]
+    # If we're already running as a previously-generated "_autostarteverything" copy --
+    # plain OR numbered, e.g. "_autostarteverything(3)" -- strip that suffix so we don't
+    # end up with "..._autostarteverything_autostarteverything" or comparing the wrong
+    # name against CURRENT_FILENAME/GITHUB_SCRIPT_URL.
+    base_name = _AUTOSTART_SUFFIX_RE.sub("", base_name)
     return script_path, folder, base_name
 
+def _next_autostart_filename(folder, base_name, current_script_path):
+    """Picks the filename to write this relaunch's autostart copy to. Must NEVER be the
+    file we're currently running as -- shutil.copyfile refuses to copy a file onto
+    itself, which is exactly what happens on a second (or later) restart if this always
+    returned the same plain "_autostarteverything.py" name: by then that plain name IS
+    the currently-running file. So: try the plain name first (covers the first restart,
+    from the original script), then (0), (1), (2)... skipping both the currently-running
+    file and any name that already exists on disk from an earlier restart, so every
+    restart gets its own distinct copy rather than colliding with or overwriting a
+    previous one."""
+    current_abs = os.path.abspath(current_script_path)
+    candidate = os.path.join(folder, f"{base_name}_autostarteverything.py")
+    if os.path.abspath(candidate) != current_abs and not os.path.exists(candidate):
+        return os.path.basename(candidate)
+    n = 0
+    while True:
+        candidate = os.path.join(folder, f"{base_name}_autostarteverything_{n}.py")
+        if os.path.abspath(candidate) != current_abs and not os.path.exists(candidate):
+            return os.path.basename(candidate)
+        n += 1
+        if n > 9999:   # sanity guard -- should never realistically be reached
+            return f"{base_name}_autostarteverything_{int(time.time())}.py"
+
 def _write_video_id_json(folder):
+    """Persists the currently-active video ID so a relaunched instance can auto-resume
+    on it. If VIDEO_ID is currently blank (bot stopped/idle when a restart happens to
+    fire) this does NOT blank out a previously-saved, valid video ID -- it keeps
+    whatever was already there. Only writes blank when there's genuinely nothing to
+    preserve yet (no file, or the existing value is itself blank) -- e.g. the very
+    first restart before the bot has ever been started on anything."""
+    path = os.path.join(folder, "video_id.json")
     try:
-        with open(os.path.join(folder, "video_id.json"), "w", encoding="utf-8") as f:
+        if not VIDEO_ID:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    existing = json.load(f).get("video_id", "")
+                if existing:
+                    return   # keep the existing, valid value -- don't overwrite with blank
+            except Exception:
+                pass   # no existing file, or it's unreadable/blank -- fine to write blank
+        with open(path, "w", encoding="utf-8") as f:
             json.dump({"video_id": VIDEO_ID}, f, indent=2)
     except Exception as e:
-        print(f"[AutoUpdate] Could not write video_id.json: {e}")
+        print(f'[AutoUpdate] Could not write video_id.json: Python exception: "{traceback.format_exc()}"')
 
 def _write_autostart_flags_json(folder):
     """Captures anything that isn't already in its own persisted config file, so the
@@ -371,7 +414,7 @@ def _write_autostart_flags_json(folder):
         with open(os.path.join(folder, "autostart_flags.json"), "w", encoding="utf-8") as f:
             json.dump(flags, f, indent=2)
     except Exception as e:
-        print(f"[AutoUpdate] Could not write autostart_flags.json: {e}")
+        print(f'[AutoUpdate] Could not write autostart_flags.json: Python exception: "{traceback.format_exc()}"')
     return flags
 
 def _download_and_verify_update(version_data):
@@ -396,7 +439,7 @@ def _download_and_verify_update(version_data):
         with urllib.request.urlopen(AUTOUPDATE_SCRIPT_URL, timeout=30) as resp:
             new_code = resp.read()
     except Exception as e:
-        print(f"[AutoUpdate] Download failed: {e}")
+        print(f'[AutoUpdate] Download failed: Python exception: "{traceback.format_exc()}"')
         return None
 
     if not expected_sha256 or not signature_hex:
@@ -423,7 +466,7 @@ def _generate_relaunch_script_macos(folder, base_name, flags):
     everything auto-starting), just in shell instead of batch. Uses curl (built into
     macOS, no PowerShell equivalent needed) instead of Invoke-WebRequest, and pkill
     instead of taskkill."""
-    autostart_script = f"{base_name}_autostarteverything.py"
+    autostart_script = flags.get("autostart_filename", f"{base_name}_autostarteverything.py")
     autostart_path   = os.path.join(folder, autostart_script)
     script_path      = os.path.join(folder, "run_update.sh")
     python_exe       = sys.executable
@@ -436,14 +479,14 @@ def _generate_relaunch_script_macos(folder, base_name, flags):
 # ============================================================
 # Auto-generated by the bot's auto-update system. Do not run
 # this by hand unless you mean to force an update/relaunch --
-# step 1 below kills EVERY python/python3 process owned by you
-# on this machine, not just this bot. The updated script itself
-# was already downloaded and signature-verified by Python
-# before this script was written -- this just re-fetches
-# version.json for the record and launches the new instance.
+# step 1 below kills any running copy of THIS bot specifically
+# (matched by its own filename), not every python process on
+# the machine -- an earlier version of this script used a much
+# broader match that could accidentally kill unrelated Python
+# applications you had open, like virt-manager.
 # ============================================================
 echo "Stopping the running bot..."
-pkill -9 -u "$(whoami)" -f "python3?( |$)" 2>/dev/null
+pkill -9 -u "$(whoami)" -f "{base_name}" 2>/dev/null
 sleep 2
 
 echo "Refreshing version.json..."
@@ -482,7 +525,7 @@ echo "Update complete."
         os.chmod(script_path, 0o755)
         return script_path
     except Exception as e:
-        print(f"[AutoUpdate] Could not write relaunch script: {e}")
+        print(f'[AutoUpdate] Could not write relaunch script: Python exception: "{traceback.format_exc()}"')
         return None
 
 def _generate_relaunch_script_linux(folder, base_name, flags):
@@ -492,7 +535,7 @@ def _generate_relaunch_script_linux(folder, base_name, flags):
     to the macOS version (curl and pkill are standard on both) -- only how it gets LAUNCHED
     differs, since Linux has no single universal terminal emulator the way macOS has
     Terminal.app (handled separately, see trigger_relaunch_pipeline below)."""
-    autostart_script = f"{base_name}_autostarteverything.py"
+    autostart_script = flags.get("autostart_filename", f"{base_name}_autostarteverything.py")
     autostart_path   = os.path.join(folder, autostart_script)
     script_path      = os.path.join(folder, "run_update.sh")
     python_exe       = sys.executable
@@ -505,14 +548,14 @@ def _generate_relaunch_script_linux(folder, base_name, flags):
 # ============================================================
 # Auto-generated by the bot's auto-update system. Do not run
 # this by hand unless you mean to force an update/relaunch --
-# step 1 below kills EVERY python/python3 process owned by you
-# on this machine, not just this bot. The updated script itself
-# was already downloaded and signature-verified by Python
-# before this script was written -- this just re-fetches
-# version.json for the record and launches the new instance.
+# step 1 below kills any running copy of THIS bot specifically
+# (matched by its own filename), not every python process on
+# the machine -- an earlier version of this script used a much
+# broader match that could accidentally kill unrelated Python
+# applications you had open, like virt-manager.
 # ============================================================
 echo "Stopping the running bot..."
-pkill -9 -u "$(whoami)" -f "python3?( |$)" 2>/dev/null
+pkill -9 -u "$(whoami)" -f "{base_name}" 2>/dev/null
 sleep 2
 
 echo "Refreshing version.json..."
@@ -551,7 +594,7 @@ echo "Update complete."
         os.chmod(script_path, 0o755)
         return script_path
     except Exception as e:
-        print(f"[AutoUpdate] Could not write relaunch script: {e}")
+        print(f'[AutoUpdate] Could not write relaunch script: Python exception: "{traceback.format_exc()}"')
         return None
 
 def _generate_relaunch_batch(folder, base_name, flags):
@@ -566,7 +609,7 @@ def _generate_relaunch_batch(folder, base_name, flags):
     different install than the one with all this bot's pip packages, or not exist on
     PATH at all, which looks exactly like "the bot never comes back" with no visible
     error, since the console window closes before anyone can read it."""
-    autostart_script = f"{base_name}_autostarteverything.py"
+    autostart_script = flags.get("autostart_filename", f"{base_name}_autostarteverything.py")
     autostart_path   = os.path.join(folder, autostart_script)
     batch_path       = os.path.join(folder, "run_update.bat")
     python_exe       = sys.executable
@@ -624,8 +667,48 @@ echo Update complete.
             f.write(bat)
         return batch_path
     except Exception as e:
-        print(f"[AutoUpdate] Could not write batch file: {e}")
+        print(f'[AutoUpdate] Could not write batch file: Python exception: "{traceback.format_exc()}"')
         return None
+
+def _save_all_configs_before_relaunch():
+    """Flushes every persisted-config category to disk before the old process gets
+    killed. Without this, only whatever the user had already explicitly clicked
+    "Save" on (each tab has its own save_*_config() call, not auto-saved on every
+    change) would survive a relaunch -- anything changed but not yet saved on a tab
+    the user hadn't clicked Save on would silently vanish the moment the old process
+    was killed (os._exit() + pkill -9 give zero opportunity for cleanup code to run).
+    Each save is independently wrapped so one failing doesn't block the rest."""
+    savers = [
+        save_flask_config, save_realpc_config, save_permissions_config,
+        save_sound_config, save_multi_stream_config, save_scheduler_config,
+        save_obs_config, save_auto_start_config, save_gemini_config, save_reconnect_config,
+        save_os_voting_config, save_music_config, save_video_config,
+        save_soundboard_config, save_internet_config,
+        lambda: save_autostart_everything_config(
+            backend=current_vm_backend, vm=VM_NAME,
+            os_voting_vm=(current_os_vm if OS_VOTING_ENABLED and current_os_vm else None),
+            os_voting_backend=(current_vm_backend if OS_VOTING_ENABLED and current_os_vm else None),
+            ai_safety_enabled=gemini_config.get("enabled"),
+            ai_safety_provider=gemini_config.get("provider"),
+            music_playback_enabled=music_config.get("enabled"),
+            video_playback_enabled=video_config.get("enabled")),
+    ]
+    for saver in savers:
+        try:
+            saver()
+        except Exception as e:
+            print(f'[AutoUpdate] Could not save {saver.__name__} before relaunch: Python exception: "{traceback.format_exc()}"')
+    # save_appearance_config() is the one outlier that takes arguments instead of
+    # reading straight from a module-level dict -- same colors/font_size construction
+    # _save_appearance() (the GUI's own Save button handler) uses. BG/ACCENT/etc. are
+    # class attributes on UltraBotGUI itself, so no instance reference is needed.
+    try:
+        colors = {key: getattr(UltraBotGUI, key)
+                  for key in ["BG", "BG2", "BG3", "ACCENT", "ACCENT2",
+                              "TEXT", "TEXTDIM", "CONSOLE", "BORDER"]}
+        save_appearance_config(colors, UltraBotGUI._FONT_SIZE)
+    except Exception as e:
+        print(f'[AutoUpdate] Could not save appearance config before relaunch: Python exception: "{traceback.format_exc()}"')
 
 def trigger_relaunch_pipeline(reason, version_data=None):
     """Shared by both the version-update watcher and the file-edit watchdog below.
@@ -641,7 +724,10 @@ def trigger_relaunch_pipeline(reason, version_data=None):
         _autoupdate_relaunch_triggered = True
 
     print(f"[AutoUpdate] {reason} -- preparing to relaunch.")
+    _save_all_configs_before_relaunch()
     script_path, folder, base_name = _script_paths()
+    autostart_filename = _next_autostart_filename(folder, base_name, script_path)
+    print(f"[AutoUpdate] This relaunch's autostart copy: {autostart_filename}")
 
     if version_data is not None:
         verified_code = _download_and_verify_update(version_data)
@@ -651,24 +737,25 @@ def trigger_relaunch_pipeline(reason, version_data=None):
         try:
             with open(os.path.join(folder, f"{base_name}.py"), "wb") as f:
                 f.write(verified_code)
-            with open(os.path.join(folder, f"{base_name}_autostarteverything.py"), "wb") as f:
+            with open(os.path.join(folder, autostart_filename), "wb") as f:
                 f.write(verified_code)
         except Exception as e:
-            print(f"[AutoUpdate] Could not write verified update to disk: {e}")
+            print(f'[AutoUpdate] Could not write verified update to disk: Python exception: "{traceback.format_exc()}"')
             _autoupdate_relaunch_triggered = False
             return
     else:
         # Local file-edit trigger, not a version update -- nothing remote to verify,
         # just carry the just-edited file's content over to the autostart copy.
         try:
-            shutil.copyfile(script_path, os.path.join(folder, f"{base_name}_autostarteverything.py"))
+            shutil.copyfile(script_path, os.path.join(folder, autostart_filename))
         except Exception as e:
-            print(f"[AutoUpdate] Could not copy edited file: {e}")
+            print(f'[AutoUpdate] Could not copy edited file: Python exception: "{traceback.format_exc()}"')
             _autoupdate_relaunch_triggered = False
             return
 
     _write_video_id_json(folder)
     flags = _write_autostart_flags_json(folder)
+    flags["autostart_filename"] = autostart_filename
 
     if REALPC_CONFIG.get("enabled"):
         print("[AutoUpdate] NOTE: Real PC Control was enabled before this relaunch. "
@@ -688,7 +775,7 @@ def trigger_relaunch_pipeline(reason, version_data=None):
             subprocess.Popen(["osascript", "-e", osa], close_fds=True)
             print(f"[AutoUpdate] Launched {os.path.basename(script_path)} in a new Terminal window. Exiting so it can take over...")
         except Exception as e:
-            print(f"[AutoUpdate] Failed to launch relaunch script: {e}")
+            print(f'[AutoUpdate] Failed to launch relaunch script: Python exception: "{traceback.format_exc()}"')
             _autoupdate_relaunch_triggered = False
             return
         time.sleep(1.0)
@@ -732,7 +819,7 @@ def trigger_relaunch_pipeline(reason, version_data=None):
                       f"detached in the background. Progress/errors are in {log_path}.")
                 launched = True
             except Exception as e:
-                print(f"[AutoUpdate] Failed to launch relaunch script: {e}")
+                print(f'[AutoUpdate] Failed to launch relaunch script: Python exception: "{traceback.format_exc()}"')
                 _autoupdate_relaunch_triggered = False
                 return
         time.sleep(1.0)
@@ -749,7 +836,7 @@ def trigger_relaunch_pipeline(reason, version_data=None):
                           cwd=folder, close_fds=True)
         print(f"[AutoUpdate] Launched {os.path.basename(batch_path)}. Exiting so it can take over...")
     except Exception as e:
-        print(f"[AutoUpdate] Failed to launch batch file: {e}")
+        print(f'[AutoUpdate] Failed to launch batch file: Python exception: "{traceback.format_exc()}"')
         _autoupdate_relaunch_triggered = False
         return
 
@@ -805,27 +892,97 @@ def _autoupdate_watcher():
             if consecutive_errors in (1, 300) or consecutive_errors % 1800 == 0:
                 print("[AutoUpdate] Version check failed (network). Will keep retrying quietly.")
 
-def _file_edit_watchdog():
-    """Watches THIS running .py file's own modified-time once a second (whether this
-    is the main GUI instance or one spawned just for the web dashboard -- both are
-    just running some .py file) and relaunches via the same pipeline if it changes
-    on disk, e.g. because you edited it or something else replaced it."""
-    script_path, _, _ = _script_paths()
+def _discover_autostart_generations(folder, base_name):
+    """Finds every existing generation of this script on disk: the original
+    base_name.py, the plain base_name_autostarteverything.py, and every numbered
+    base_name_autostarteverything(N).py -- returns their full paths. Used so the
+    watchdog can watch ALL of them, not just whichever one happens to be running."""
+    found = []
+    original = os.path.join(folder, f"{base_name}.py")
+    if os.path.isfile(original):
+        found.append(original)
     try:
-        last_mtime = os.path.getmtime(script_path)
+        for fname in os.listdir(folder):
+            if not fname.lower().endswith(".py"):
+                continue
+            stem = fname[:-3]
+            if not stem.startswith(f"{base_name}_autostarteverything"):
+                continue
+            suffix = stem[len(f"{base_name}_autostarteverything"):]
+            if suffix == "" or _AUTOSTART_SUFFIX_RE.fullmatch(f"_autostarteverything{suffix}"):
+                found.append(os.path.join(folder, fname))
     except Exception:
+        pass
+    return found
+
+def _file_edit_watchdog():
+    """Watches for on-disk changes to relaunch from -- EVERY existing generation of
+    this script found in the folder: the original base_name.py, the plain
+    _autostarteverything.py, and every numbered _autostarteverything(N).py, not just
+    whichever one happens to be currently running. Watching only the running file was
+    the actual bug: once running as, say, "..._autostarteverything(1).py", replacing
+    the ORIGINAL "base_name.py" -- or an older generation like "(0)" -- went
+    completely unnoticed, since those are different files the watchdog was never
+    looking at. Re-scans the folder each cycle (cheap -- one os.listdir() a second) so
+    a generation created mid-session gets picked up too. Whichever file actually
+    changes on disk is the one carried over to the new autostart copy, not blindly
+    whichever file this process happens to be running as."""
+    script_path, folder, base_name = _script_paths()
+    last_mtimes = {}
+
+    def _rescan():
+        for p in _discover_autostart_generations(folder, base_name):
+            if p not in last_mtimes:
+                try:
+                    last_mtimes[p] = os.path.getmtime(p)
+                except Exception:
+                    pass
+
+    _rescan()
+    # Always track the running file itself even if, for some reason, it wasn't
+    # picked up by the discovery scan (e.g. an unusual filename edge case).
+    if script_path not in last_mtimes:
+        try:
+            last_mtimes[script_path] = os.path.getmtime(script_path)
+        except Exception:
+            pass
+    if not last_mtimes:
         return
+
     while not bot_stop_event.is_set():
         if bot_stop_event.wait(1):
             break
-        try:
-            mtime = os.path.getmtime(script_path)
-            if mtime != last_mtime:
-                last_mtime = mtime
-                trigger_relaunch_pipeline(f"{os.path.basename(script_path)} was modified on disk")
-                break
-        except Exception:
-            pass   # file briefly missing mid-write, etc. -- just try again next second
+        _rescan()   # pick up any generation created since the last check
+        for p in list(last_mtimes.keys()):
+            try:
+                mtime = os.path.getmtime(p)
+                if mtime != last_mtimes[p]:
+                    last_mtimes[p] = mtime
+                    # Debounce: a big (~500KB+) file replacement can take a
+                    # perceptible moment to finish writing, and this could
+                    # otherwise catch it mid-copy -- relaunching into a
+                    # partially-written, likely-broken script, which fails
+                    # in a way that looks exactly like "the restart just
+                    # didn't happen" to anyone watching. Wait 5s and check
+                    # again: if the mtime changed AGAIN in that window, the
+                    # file is still actively being written, so keep waiting
+                    # (the loop's own next iteration will catch that) rather
+                    # than triggering on what might still be a half-written
+                    # file.
+                    if bot_stop_event.wait(5):
+                        return
+                    try:
+                        settled_mtime = os.path.getmtime(p)
+                    except Exception:
+                        continue   # still mid-write/briefly missing -- try again next second
+                    if settled_mtime != mtime:
+                        last_mtimes[p] = settled_mtime
+                        continue   # still changing -- not settled yet, don't trigger
+                    trigger_relaunch_pipeline(f"{os.path.basename(p)} was modified on disk",
+                                               source_path=p)
+                    return
+            except Exception:
+                pass   # file briefly missing mid-write, etc. -- just try again next second
 
 
 # Show the splash immediately — before any heavy imports — so the user
@@ -961,6 +1118,27 @@ from tkinter import ttk, scrolledtext, messagebox
 
 _update_splash(58, "Importing media / web libraries...")
 
+# ── Optional dep for Gemini-based pre-execution safety/copyright screening ──
+try:
+    from google import genai as _gemini_genai
+    from google.genai import types as _gemini_types
+    gemini_available = True
+except ImportError:
+    _gemini_genai = None
+    _gemini_types = None
+    gemini_available = False
+
+# ── Optional dep for Groq -- the alternative provider for the same pre-execution
+#    safety/copyright screening. Groq's API is OpenAI-compatible (same request/
+#    response shape, just a different base_url and key), so this reuses the
+#    standard `openai` package rather than needing a Groq-specific SDK. ──
+try:
+    import openai as _groq_openai_sdk
+    groq_available = True
+except ImportError:
+    _groq_openai_sdk = None
+    groq_available = False
+
 # ── Optional deps for Music/Video/Soundboard/Flask dashboard (ported from the VMware build) ──
 try:
     import vlc as _vlc
@@ -1052,7 +1230,16 @@ try:
     import pystray
     from PIL import Image, ImageDraw
     _PYSTRAY_OK = True
-except ImportError:
+except Exception:
+    # Broader than ImportError on purpose: on Linux, pystray's own import-time backend
+    # selection can raise ValueError (not ImportError) if a required GObject
+    # Introspection namespace -- AppIndicator3, AyatanaAppIndicator3 -- isn't installed
+    # on the system (gi.require_version() raises ValueError, not ImportError, when the
+    # namespace is missing). That was propagating straight through this except clause
+    # and crashing the whole script at startup, instead of just disabling the tray icon
+    # like this try/except was meant to do. If you hit this, `sudo apt install
+    # gir1.2-ayatanaappindicator3-0.1` (or gir1.2-appindicator3-0.1 on older distros)
+    # fixes it, but the bot now starts fine either way -- tray icon is optional.
     _PYSTRAY_OK = False
     print("[Tray] pystray/Pillow not installed — system tray disabled. Run: pip install pystray pillow")
 
@@ -1091,7 +1278,7 @@ def notify(title, message, timeout=4):
                     timeout=timeout,
                 )
             except Exception as e:
-                print(f"[Notify] Error: {e}")
+                print(f'[Notify] Error: Python exception: "{traceback.format_exc()}"')
         else:
             print(f"[Notify] {title}: {message}")
     threading.Thread(target=_send, daemon=True).start()
@@ -1184,7 +1371,7 @@ def load_custom_commands():
                 custom_commands = json.load(f)
             print(f"[CustomCmd] {len(custom_commands)} custom command(s) loaded.")
     except Exception as e:
-        print(f"[CustomCmd] Load error: {e}")
+        print(f'[CustomCmd] Load error: Python exception: "{traceback.format_exc()}"')
         custom_commands = {}
 
 def save_custom_commands():
@@ -1193,7 +1380,7 @@ def save_custom_commands():
             json.dump(custom_commands, f, indent=2, ensure_ascii=False)
         print(f"[CustomCmd] Saved {len(custom_commands)} command(s).")
     except Exception as e:
-        print(f"[CustomCmd] Save error: {e}")
+        print(f'[CustomCmd] Save error: Python exception: "{traceback.format_exc()}"')
 
 def execute_custom_command(trigger):
     steps = custom_commands.get(trigger, [])
@@ -1247,7 +1434,7 @@ def execute_custom_command(trigger):
                 handle_mouse("scroll", args)
             print(f"[CustomCmd]   → {action} {args}")
         except Exception as e:
-            print(f"[CustomCmd] Step error ({action} {args}): {e}")
+            print(f'[CustomCmd] Step error ({action} {args}): Python exception: "{traceback.format_exc()}"')
 
 # ========================= OVERLAY SYSTEM =========================
 overlay_data = {"chat": [], "running_command": "", "viewers": None, "likes": None, "subscribers": None}
@@ -1327,20 +1514,41 @@ def fetch_youtube_stats():
                     except Exception:
                         pass
         except Exception as e:
-            print(f"[Stats] Fetch error: {e}")
+            print(f'[Stats] Fetch error: Python exception: "{traceback.format_exc()}"')
         if bot_stop_event.wait(30):
             break
 
+_overlay_server_started = False
+
 def start_overlay_server():
+    """Serves the OBS browser-source overlay pages and polls chat history/status over
+    HTTP -- this is independent of the bot's own YouTube connection lifecycle (the
+    overlay just has less to show while disconnected, it doesn't need to restart
+    alongside the bot). Guarded to only ever actually start once: the bot itself can
+    be started and stopped many times across a session, but each restart used to call
+    this again, and since serve_forever() has no hook into bot_stop_event and never
+    actually stops on its own, every restart after the first was trying to rebind an
+    already-occupied port -- which is what previously showed up as
+    "[Overlay] Port 8083 is busy" following any bot restart."""
+    global _overlay_server_started
+    if _overlay_server_started:
+        return
+    _overlay_server_started = True
     PORT = 8083
     class QuietHandler(http.server.SimpleHTTPRequestHandler):
         def log_message(self, format, *args): pass
+    class ReusableTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True   # defensive: helps a fresh process rebind even if
+                                      # the OS hasn't fully released the port yet from a
+                                      # just-exited previous process (e.g. right after
+                                      # this script's own auto-update/relaunch)
     try:
-        with socketserver.TCPServer(("", PORT), QuietHandler) as httpd:
+        with ReusableTCPServer(("", PORT), QuietHandler) as httpd:
             print(f"[Overlay] Server running at: http://localhost:{PORT}/chat.html")
             httpd.serve_forever()
     except OSError:
         print("[Overlay] Port 8083 is busy.")
+        _overlay_server_started = False   # didn't actually start -- allow a later retry
 
 html_index = """<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Chat Controls</title><style>body{background:#09090b;color:#00E5FF;font-family:'Segoe UI',Consolas,monospace;text-align:center;padding:40px}h1{color:#10B981;font-size:36px;text-shadow:0 0 10px rgba(16,185,129,0.3);margin-bottom:5px}.grid{display:flex;flex-wrap:wrap;gap:20px;justify-content:center;max-width:800px;margin:40px auto}a{background:#18181b;border:1px solid #27272a;color:#fff;text-decoration:none;padding:20px;border-radius:12px;width:300px;transition:all 0.2s;box-shadow:0 4px 6px rgba(0,0,0,0.3);text-align:left}a:hover{transform:translateY(-5px);border-color:#00E5FF;box-shadow:0 8px 15px rgba(0,229,255,0.2)}.title{font-size:20px;font-weight:bold;margin-bottom:10px;color:#00E5FF}.desc{font-size:14px;color:#a1a1aa}</style></head><body><h1>[active] chat server active</h1><p style="color:#71717a;font-size:18px">Add one of these links to your OBS Browser Source:</p><div class="grid"><a href="/obsnew"><div class="title">Liquid Glass Chat (/obsnew)</div><div class="desc">Sleek gray bubbles with a glass background.</div></a><a href="/oldobsnew"><div class="title">Classic Dark Chat (/oldobsnew)</div><div class="desc">The OG dark background modern chat.</div></a><a href="/ultradebug"><div class="title">Ultra Debug (/ultradebug)</div><div class="desc">Shows core system status and queues.</div></a><a href="/stats"><div class="title">Live Stats (/stats)</div><div class="desc">Viewers, Likes, and Uptime widget.</div></a><a href="/obs"><div class="title">Legacy Chat (/obs)</div><div class="desc">The original transparent overlay.</div></a><a href="/nowplaying"><div class="title">Now Playing (/nowplaying)</div><div class="desc">Bottom-left song title + artist overlay for !sr.</div></a><a href="/votes-overlay"><div class="title">Restart/Revert Votes (/votes-overlay)</div><div class="desc">Live progress bars for pending restart/revert votes.</div></a><a href="/osvotestatus"><div class="title">OS Vote Status (/osvotestatus)</div><div class="desc">Per-OS voting tally, highlights the currently running OS.</div></a><a href="/banvote"><div class="title">Ban Vote (/banvote)</div><div class="desc">Progress toward the current ban vote, if any.</div></a><a href="/status"><div class="title">Bot Status (/status)</div><div class="desc">Simple current-status text box.</div></a></div></body></html>"""
 
@@ -1991,7 +2199,7 @@ def start_flask_server(port=None):
             try:
                 app.run(host="0.0.0.0", port=p, debug=False, use_reloader=False, threaded=True)
             except Exception as e:
-                print(f"[FlaskDashboard] Server error: {e}")
+                print(f'[FlaskDashboard] Server error: Python exception: "{traceback.format_exc()}"')
             finally:
                 _flask_running = False
 
@@ -2069,7 +2277,7 @@ def spawn_flask_multistream(port):
         console_log("INFO", f"[WebDashboard] spawned new instance on port {port}: {multi_script_path}")
         return True, proc
     except Exception as e:
-        console_log("ERROR", f"[WebDashboard] spawn_flask_multistream crashed: {e}")
+        console_log("ERROR", f'[WebDashboard] spawn_flask_multistream crashed: Python exception: "{traceback.format_exc()}"')
         return False, str(e)
 
 
@@ -2192,7 +2400,7 @@ def _load_vmware_vm_registry():
             with open(VMRUN_VM_REGISTRY_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception as e:
-        print(f"[VMware VM Registry] Load error: {e}")
+        print(f'[VMware VM Registry] Load error: Python exception: "{traceback.format_exc()}"')
     return {}
 
 def _save_vmware_vm_registry(registry):
@@ -2200,7 +2408,7 @@ def _save_vmware_vm_registry(registry):
         with open(VMRUN_VM_REGISTRY_FILE, "w", encoding="utf-8") as f:
             json.dump(registry, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"[VMware VM Registry] Save error: {e}")
+        print(f'[VMware VM Registry] Save error: Python exception: "{traceback.format_exc()}"')
 
 def register_vmware_vm(vmx_path, alias=None):
     registry = _load_vmware_vm_registry()
@@ -2234,28 +2442,28 @@ def vmware_is_running(vmx_path, vmrun_path=None):
         result = subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "list"], capture_output=True, text=True, timeout=15)
         return vmx_path.lower() in result.stdout.lower()
     except Exception as e:
-        print(f"[VMRun] list error: {e}")
+        print(f'[VMRun] list error: Python exception: "{traceback.format_exc()}"')
         return False
 
 def vmware_start(vmx_path, gui=True, vmrun_path=None):
     vmrun_path = vmrun_path or VMRUN_PATH
-    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "start", vmx_path, "gui" if gui else "nogui"], capture_output=True, text=True)
+    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "start", vmx_path, "gui" if gui else "nogui"], capture_output=True, text=True, timeout=30)
 
 def vmware_stop(vmx_path, hard=True, vmrun_path=None):
     vmrun_path = vmrun_path or VMRUN_PATH
-    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "stop", vmx_path, "hard" if hard else "soft"], capture_output=True, text=True)
+    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "stop", vmx_path, "hard" if hard else "soft"], capture_output=True, text=True, timeout=20)
 
 def vmware_reset(vmx_path, vmrun_path=None):
     vmrun_path = vmrun_path or VMRUN_PATH
-    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "reset", vmx_path, "hard"], capture_output=True, text=True)
+    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "reset", vmx_path, "hard"], capture_output=True, text=True, timeout=20)
 
 def vmware_revert_to_snapshot(vmx_path, snapshot_name, vmrun_path=None):
     vmrun_path = vmrun_path or VMRUN_PATH
-    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "revertToSnapshot", vmx_path, snapshot_name], capture_output=True, text=True)
+    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "revertToSnapshot", vmx_path, snapshot_name], capture_output=True, text=True, timeout=60)
 
 def vmware_take_snapshot(vmx_path, snapshot_name, vmrun_path=None):
     vmrun_path = vmrun_path or VMRUN_PATH
-    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "snapshot", vmx_path, snapshot_name], capture_output=True, text=True)
+    return subprocess.run([vmrun_path, "-T", VMRUN_TARGET_TYPE, "snapshot", vmx_path, snapshot_name], capture_output=True, text=True, timeout=60)
 
 def vmware_toggle_internet(enable, vmrun_path=None):
     """Host-wide VMware NAT Service toggle -- matches the mechanism used in the
@@ -2351,7 +2559,7 @@ def vm_is_running(target, backend=None):
         res = subprocess.run([VBOXMANAGE_PATH, "list", "runningvms"], capture_output=True, text=True, timeout=15)
         return f'"{target}"' in (res.stdout or "")
     except Exception as e:
-        print(f"[VBoxManage] list error: {e}")
+        print(f'[VBoxManage] list error: Python exception: "{traceback.format_exc()}"')
         return False
 
 def get_backend_for_vm(vm_identifier):
@@ -2388,7 +2596,7 @@ def get_vm_list():
         vms = re.findall(r'"([^"]+)"', result.stdout)
         return vms
     except Exception as e:
-        print(f"[VM List] Error: {e}")
+        print(f'[VM List] Error: Python exception: "{traceback.format_exc()}"')
         return []
 
 VBOXMANAGE_PATH = get_vboxmanage_path()
@@ -2413,7 +2621,7 @@ def update_votes_json(vote_type: str, current: int, required: int, remaining_tim
         with open(VOTES_JSON_FILE, "w", encoding="utf-8") as f:
             json.dump(_votes_state, f, separators=(',', ':'))
     except Exception as e:
-        print(f"[Votes] Write error: {e}")
+        print(f'[Votes] Write error: Python exception: "{traceback.format_exc()}"')
 BAN_DURATION      = 1800
 VOTE_TIMEOUT      = 120
 SUCCESS_SOUND_FILE = "success.mp3"
@@ -2463,7 +2671,7 @@ def load_realpc_config():
             REALPC_CONFIG.update(data)
             print("[RealPC] Config loaded.")
     except Exception as e:
-        print(f"[RealPC] Load error: {e}")
+        print(f'[RealPC] Load error: Python exception: "{traceback.format_exc()}"')
 
 
 def save_realpc_config():
@@ -2472,7 +2680,7 @@ def save_realpc_config():
             json.dump(REALPC_CONFIG, f, indent=2)
         print("[RealPC] Config saved.")
     except Exception as e:
-        print(f"[RealPC] Save error: {e}")
+        print(f'[RealPC] Save error: Python exception: "{traceback.format_exc()}"')
 
 
 def _realpc_set_status(msg: str):
@@ -2675,7 +2883,7 @@ def _realpc_execute(username: str, action: str, args: str):
         _realpc_set_status("FAILSAFE triggered — mouse moved to corner.")
         _append_event("REALPC_FAILSAFE", username, "failsafe triggered")
     except Exception as e:
-        print(f"[RealPC] Execute error (!{action}): {e}")
+        print(f'[RealPC] Execute error (!{action}): Python exception: "{traceback.format_exc()}"')
         _append_event("REALPC_ERROR", username, f"!{action}: {e}")
 
 
@@ -2776,7 +2984,7 @@ def _realpc_bot_loop():
 
         except Exception as e:
             if not _realpc_stop_event.is_set():
-                print(f"[RealPC] Loop error: {e}")
+                print(f'[RealPC] Loop error: Python exception: "{traceback.format_exc()}"')
 
         if _realpc_stop_event.wait(0.05):
             break
@@ -2831,7 +3039,7 @@ def _persist_event_log():
             with open(EVENT_LOG_FILE, "w", encoding="utf-8") as f:
                 json.dump(snapshot, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"[EventLog] Write error: {e}")
+            print(f'[EventLog] Write error: Python exception: "{traceback.format_exc()}"')
     threading.Thread(target=_write, daemon=True).start()
 
 def load_event_log():
@@ -2844,7 +3052,7 @@ def load_event_log():
                 _event_log = data if isinstance(data, list) else []
             print(f"[EventLog] Loaded {len(_event_log)} entries.")
     except Exception as e:
-        print(f"[EventLog] Load error: {e}")
+        print(f'[EventLog] Load error: Python exception: "{traceback.format_exc()}"')
         _event_log = []
 
 # ========================= PERMISSIONS CONFIG =========================
@@ -2884,7 +3092,7 @@ def load_permissions_config():
             PERMISSIONS_CONFIG.update(data)
             print("[Permissions] Config loaded.")
     except Exception as e:
-        print(f"[Permissions] Load error: {e}")
+        print(f'[Permissions] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_permissions_config():
     try:
@@ -2892,7 +3100,7 @@ def save_permissions_config():
             json.dump(PERMISSIONS_CONFIG, f, indent=2)
         print("[Permissions] Config saved.")
     except Exception as e:
-        print(f"[Permissions] Save error: {e}")
+        print(f'[Permissions] Save error: Python exception: "{traceback.format_exc()}"')
 
 # ========================= SOUND & TTS CONFIG =========================
 SOUND_CONFIG_FILE = "sound_config.json"
@@ -2917,7 +3125,7 @@ def load_sound_config():
             SUCCESS_SOUND_FILE = SOUND_CONFIG.get("success_sound", "success.mp3")
             print("[Sound] Config loaded.")
     except Exception as e:
-        print(f"[Sound] Load error: {e}")
+        print(f'[Sound] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_sound_config():
     try:
@@ -2925,7 +3133,7 @@ def save_sound_config():
             json.dump(SOUND_CONFIG, f, indent=2)
         print("[Sound] Config saved.")
     except Exception as e:
-        print(f"[Sound] Save error: {e}")
+        print(f'[Sound] Save error: Python exception: "{traceback.format_exc()}"')
 
 def play_event_sound(event_key: str):
     """Play the sound file configured for a specific event key."""
@@ -2955,7 +3163,7 @@ def load_multi_stream_config():
             MULTI_STREAM_CONFIG.update(data)
             print(f"[MultiStream] Config loaded. {len(MULTI_STREAM_CONFIG['video_ids'])} extra stream(s).")
     except Exception as e:
-        print(f"[MultiStream] Load error: {e}")
+        print(f'[MultiStream] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_multi_stream_config():
     try:
@@ -2963,7 +3171,7 @@ def save_multi_stream_config():
             json.dump(MULTI_STREAM_CONFIG, f, indent=2)
         print("[MultiStream] Config saved.")
     except Exception as e:
-        print(f"[MultiStream] Save error: {e}")
+        print(f'[MultiStream] Save error: Python exception: "{traceback.format_exc()}"')
 
 # ========================= SCHEDULER CONFIG =========================
 SCHEDULER_CONFIG_FILE = "scheduler_config.json"
@@ -2984,7 +3192,7 @@ def load_scheduler_config():
             SCHEDULER_CONFIG.update(data)
             print(f"[Scheduler] Config loaded. {len(SCHEDULER_CONFIG['tasks'])} task(s).")
     except Exception as e:
-        print(f"[Scheduler] Load error: {e}")
+        print(f'[Scheduler] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_scheduler_config():
     try:
@@ -2992,7 +3200,7 @@ def save_scheduler_config():
             json.dump(SCHEDULER_CONFIG, f, indent=2)
         print("[Scheduler] Config saved.")
     except Exception as e:
-        print(f"[Scheduler] Save error: {e}")
+        print(f'[Scheduler] Save error: Python exception: "{traceback.format_exc()}"')
 
 def _run_scheduled_action(action: str, label: str):
     """Execute a scheduled revert or restart in a background thread."""
@@ -3117,7 +3325,7 @@ def log_error(source, error, extra=""):
             f.write(msg + "\n")
         print(f"[ErrorLog] {msg}")
     except Exception as e:
-        print(f"[ErrorLog] Could not write log: {e}")
+        print(f'[ErrorLog] Could not write log: Python exception: "{traceback.format_exc()}"')
     try:
         obs_trigger("error_occurred_with_script")
     except Exception:
@@ -3233,8 +3441,113 @@ def _process_test_mode_line(line):
             return True
         print(f"[TestMode] OK: !{cmd} {args}")
     except Exception as e:
-        print(f"[TestMode] Error executing !{cmd}: {e}")
+        print(f'[TestMode] Error executing !{cmd}: Python exception: "{traceback.format_exc()}"')
     return True
+
+def run_single_bot_command(line):
+    """Executes one "!cmd args" line exactly as the chat loop or test mode console
+    would -- OS-voting triggers, custom commands, then built-in commands (!type,
+    !send, !click, !combo, !key, etc.). Returns (ok: bool, message: str) instead of
+    printing directly, so callers (test mode's stdin loop, the GUI's Admin CMD box,
+    anything else) can each show the result wherever makes sense for them, rather
+    than this function assuming it's always talking to a terminal.
+    Does NOT handle !quit/!exit/!stop -- those are test-mode-console-specific and
+    stay in run_test_mode()'s own loop, since "stop test mode" isn't a sensible
+    action to trigger from, say, the Admin CMD box."""
+    line = line.strip()
+    if not line.startswith("!"):
+        return False, "Commands must start with '!' — e.g. !type hello"
+
+    parts = line[1:].split(" ", 1)
+    cmd   = parts[0].lower().strip()
+    args  = parts[1].strip() if len(parts) > 1 else ""
+
+    # OS voting triggers
+    if OS_VOTING_ENABLED:
+        os_trigger_map = get_os_trigger_map()
+        if cmd in os_trigger_map:
+            target_entry = os_trigger_map[cmd]
+            threading.Thread(target=switch_os, args=(target_entry,), daemon=True).start()
+            return True, f"Owner-bypass OS switch → {target_entry['name']}"
+
+    # Custom commands
+    trigger = "!" + cmd
+    if trigger in custom_commands:
+        threading.Thread(target=execute_custom_command, args=(trigger,), daemon=True).start()
+        return True, f"Running custom command {trigger}"
+
+    # Built-in commands
+    try:
+        if cmd in ("type", "text", "say"):
+            send_keyboard(args)
+        elif cmd in ("send", "sendenter", "typeenter", "sendline"):
+            send_keyboard(args)
+            time.sleep(0.05)
+            send_special_enter()
+        elif cmd == "enter":
+            send_special_enter()
+        elif cmd in ("key", "press"):
+            k = args.lower().strip()
+            if k in SCANCODES:
+                send_scancode(SCANCODES[k][0])
+                time.sleep(0.01)
+                send_scancode(SCANCODES[k][1])
+            else:
+                send_keyboard(k)
+        elif cmd in ("combo", "chord", "multi"):
+            keys = parse_combo_keys(args)
+            if keys:
+                send_combo(keys)
+        elif cmd in ("click", "lclick", "rclick", "rightclick",
+                     "mclick", "middleclick", "move", "mouse", "mv",
+                     "abs", "cursor", "moveabs", "drag", "dragrel",
+                     "dragabs", "drag_absolute", "scroll", "wheel"):
+            handle_mouse(cmd, args)
+        elif cmd in ("startvm", "launchvm"):
+            start_vm()
+        elif cmd in ("restartvm", "restart"):
+            speak_text("Restarting Virtual Machine...")
+            update_status("Restarting...")
+            _checked(vm_reset(VM_NAME, current_vm_backend))
+            update_status("Running")
+            play_success_sound()
+            obs_trigger("restart")
+            obs_trigger("restart_done")
+            apply_current_os_scene()
+        elif cmd == "revert":
+            global revert_in_progress, revert_start_time
+            speak_text("Reverting Virtual Machine...")
+            revert_in_progress = True
+            update_status("Reverting...")
+            try:
+                _checked(vm_stop(VM_NAME, current_vm_backend, hard=True))
+                time.sleep(3)
+                _checked(vm_revert_to_current(VM_NAME, current_vm_backend))
+                time.sleep(3)
+                _checked(vm_start(VM_NAME, current_vm_backend, gui=True))
+                update_status("Running")
+                play_success_sound()
+                obs_trigger("revert_done")
+                apply_current_os_scene()
+                vote_revert.clear()
+                update_votes_json("revert", 0, 2, 0)
+            finally:
+                revert_start_time = None
+        elif cmd in ("restore", "focus", "front"):
+            restore_window()
+        elif cmd == "run":
+            send_combo(["win", "r"])
+        elif cmd in ("wait", "pause", "delay"):
+            try:
+                delay = max(0, min(float(args), 5.0))
+                time.sleep(delay)
+            except ValueError:
+                pass
+        else:
+            return False, f"Unknown command: !{cmd}"
+        return True, f"OK: !{cmd} {args}"
+    except Exception as e:
+        return False, f"Error executing !{cmd}: {e}"
 
 def run_test_mode():
     """
@@ -3243,24 +3556,22 @@ def run_test_mode():
     Type  !quit  or  !exit  to stop test mode.
     Supports all bot commands: !type, !send, !click, !combo, !key, etc.
     Also supports OS-voting triggers if OS Voting is enabled.
-
-    WINDOWS/LINUX ONLY -- on macOS, _on_test_mode_toggle() uses
-    _test_mode_poll_stdin() instead (see the note there for why): running blocking
-    input() on a background thread while Tkinter's mainloop() is active on the main
-    thread is a known problematic combination on macOS specifically, where Python's
-    stdin/readline handling can contend with Tcl's own event notifier across threads
-    and corrupt it -- surfacing as "Tcl_WaitForEvent: Notifier not initialized" and a
-    hard abort, sometimes from code that looks unrelated to input() at all.
     """
     print("[TestMode] Started. Type commands (e.g. '!type hello', '!click', '!win7'). Type '!quit' to stop.")
     print("[TestMode] All normal bot commands are supported.")
     while not bot_stop_event.is_set():
         try:
-            line = input("[TestMode] > ")
+            line = input("[TestMode] > ").strip()
         except (EOFError, KeyboardInterrupt):
             break
-        if not _process_test_mode_line(line):
+        if not line:
+            continue
+        if line.lower() in ("!quit", "!exit", "!stop"):
+            print("[TestMode] Stopping test mode.")
+            bot_stop_event.set()
             break
+        ok, message = run_single_bot_command(line)
+        print(f"[TestMode] {message}")
     print("[TestMode] Stopped.")
 vote_restart = {}
 vote_revert  = {}
@@ -3327,7 +3638,7 @@ def load_user_mgmt():
             vip_users       = {normalize_username(k): v for k, v in data.get("vip", {}).items()}
             print(f"[UserMgmt] Loaded. whitelist={len(whitelist_users)}, vip={len(vip_users)}")
     except Exception as e:
-        print(f"[UserMgmt] Load error: {e}")
+        print(f'[UserMgmt] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_user_mgmt():
     try:
@@ -3336,7 +3647,7 @@ def save_user_mgmt():
                        "vip":       vip_users}, f, indent=2, ensure_ascii=False)
         print("[UserMgmt] Saved.")
     except Exception as e:
-        print(f"[UserMgmt] Save error: {e}")
+        print(f'[UserMgmt] Save error: Python exception: "{traceback.format_exc()}"')
 AUTO_START_ENABLED = True   # if False, watchdog_restart will not auto-revive a powered-off VM
 AUTO_START_CONFIG_FILE = "auto_start_config.json"
 
@@ -3380,7 +3691,7 @@ def load_obs_config():
             OBS_CONFIG.update(data)
             print("[OBS] Config loaded.")
     except Exception as e:
-        print(f"[OBS] Load error: {e}")
+        print(f'[OBS] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_obs_config():
     try:
@@ -3388,7 +3699,7 @@ def save_obs_config():
             json.dump(OBS_CONFIG, f, indent=2)
         print("[OBS] Config saved.")
     except Exception as e:
-        print(f"[OBS] Save error: {e}")
+        print(f'[OBS] Save error: Python exception: "{traceback.format_exc()}"')
 
 def obs_connect():
     global _obs_client, _obs_connected
@@ -3408,7 +3719,7 @@ def obs_connect():
     except Exception as e:
         _obs_connected = False
         _obs_client    = None
-        print(f"[OBS] Connection failed: {e}")
+        print(f'[OBS] Connection failed: Python exception: "{traceback.format_exc()}"')
         return False
 
 def obs_disconnect():
@@ -3428,7 +3739,7 @@ def obs_set_scene(scene_name: str):
         _obs_client.set_current_program_scene(scene_name)
         print(f"[OBS] Scene → '{scene_name}'")
     except Exception as e:
-        print(f"[OBS] Scene switch error: {e}")
+        print(f'[OBS] Scene switch error: Python exception: "{traceback.format_exc()}"')
         log_error("OBS", e)
 
 def obs_trigger(event: str):
@@ -3508,7 +3819,7 @@ def load_appearance_config():
                 UltraBotGUI._FONT_SIZE = int(font_size)
             print(f"[Appearance] Config loaded.")
     except Exception as e:
-        print(f"[Appearance] Load error: {e}")
+        print(f'[Appearance] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_appearance_config(colors: dict, font_size: int):
     try:
@@ -3516,7 +3827,7 @@ def save_appearance_config(colors: dict, font_size: int):
             json.dump({"colors": colors, "font_size": font_size}, f, indent=2)
         print("[Appearance] Config saved.")
     except Exception as e:
-        print(f"[Appearance] Save error: {e}")
+        print(f'[Appearance] Save error: Python exception: "{traceback.format_exc()}"')
 
 def load_auto_start_config():
     global AUTO_START_ENABLED
@@ -3527,7 +3838,7 @@ def load_auto_start_config():
             AUTO_START_ENABLED = bool(data.get("enabled", True))
             print(f"[AutoStart] Config loaded. Enabled={AUTO_START_ENABLED}")
     except Exception as e:
-        print(f"[AutoStart] Load error: {e}")
+        print(f'[AutoStart] Load error: Python exception: "{traceback.format_exc()}"')
         AUTO_START_ENABLED = True
 
 def save_auto_start_config():
@@ -3536,7 +3847,423 @@ def save_auto_start_config():
             json.dump({"enabled": AUTO_START_ENABLED}, f, indent=2)
         print(f"[AutoStart] Config saved. Enabled={AUTO_START_ENABLED}")
     except Exception as e:
-        print(f"[AutoStart] Save error: {e}")
+        print(f'[AutoStart] Save error: Python exception: "{traceback.format_exc()}"')
+
+AUTOSTART_EVERYTHING_CONFIG_FILE = "autostarteverything.json"
+
+# ── Pre-execution safety/copyright screening -- Gemini or Groq, selectable ──
+# Gemini uses the current (as of July 2026) google-genai SDK, NOT the deprecated
+# google-generativeai package -- that older package's genai.GenerativeModel(...)
+# pattern is legacy, and gemini-1.5-flash/gemini-2.0-flash (the models most commonly
+# seen in older examples) have both been shut down and now 404. gemini-3.6-flash is
+# the current stable, generally-available Flash model.
+# Groq is OpenAI-API-compatible, so it's called through the standard `openai` package
+# rather than a Groq-specific SDK, just pointed at Groq's base_url. openai/gpt-oss-120b
+# is Groq's current, non-deprecated model confirmed to support Structured Outputs
+# (several other Groq models were deprecated earlier this year with users migrated
+# toward this one specifically). Both providers are fast/cheap Flash-tier models,
+# which matters here since this runs before every checked command, not a heavy
+# reasoning task -- Groq in particular is chosen by users who want the extra speed
+# of its LPU hardware over Gemini's.
+GEMINI_CONFIG_FILE = "gemini_config.json"   # filename kept as-is for backward
+                                             # compatibility with any already-saved
+                                             # config from before Groq support existed
+GEMINI_MODEL = "gemini-3.6-flash"
+GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+gemini_config = {"enabled": False, "provider": "gemini", "gemini_api_key": "", "groq_api_key": ""}
+_gemini_client = None
+_groq_client = None
+
+def load_gemini_config():
+    global gemini_config
+    try:
+        if os.path.exists(GEMINI_CONFIG_FILE):
+            with open(GEMINI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            # Migrate the old single "api_key" field (from before Groq support
+            # existed) to "gemini_api_key" if present, so an already-saved key isn't
+            # silently lost on upgrade.
+            if "api_key" in loaded and "gemini_api_key" not in loaded:
+                loaded["gemini_api_key"] = loaded.pop("api_key")
+            gemini_config.update(loaded)
+        print(f"[AI Safety] Config loaded. Enabled={gemini_config.get('enabled')}, "
+              f"provider={gemini_config.get('provider')}")
+    except Exception as e:
+        print(f'[AI Safety] Load error: Python exception: "{traceback.format_exc()}"')
+
+def save_gemini_config():
+    try:
+        with open(GEMINI_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(gemini_config, f, indent=2)
+        print(f"[AI Safety] Config saved. Enabled={gemini_config.get('enabled')}, "
+              f"provider={gemini_config.get('provider')}")
+    except Exception as e:
+        print(f'[AI Safety] Save error: Python exception: "{traceback.format_exc()}"')
+
+def _get_gemini_client():
+    """Lazily creates (and caches) the Gemini client -- only if the library is
+    installed and an API key has actually been entered. Returns None otherwise."""
+    global _gemini_client
+    if not gemini_available or not gemini_config.get("gemini_api_key", "").strip():
+        return None
+    if _gemini_client is None:
+        try:
+            _gemini_client = _gemini_genai.Client(api_key=gemini_config["gemini_api_key"].strip())
+        except Exception as e:
+            print(f'[AI Safety] Gemini client init error: Python exception: "{traceback.format_exc()}"')
+            return None
+    return _gemini_client
+
+def _get_groq_client():
+    """Lazily creates (and caches) the Groq client -- just the standard OpenAI client
+    pointed at Groq's own base_url, since Groq's API is OpenAI-compatible. Only if
+    the library is installed and an API key has actually been entered."""
+    global _groq_client
+    if not groq_available or not gemini_config.get("groq_api_key", "").strip():
+        return None
+    if _groq_client is None:
+        try:
+            _groq_client = _groq_openai_sdk.OpenAI(api_key=gemini_config["groq_api_key"].strip(),
+                                                    base_url=GROQ_BASE_URL)
+        except Exception as e:
+            print(f'[AI Safety] Groq client init error: Python exception: "{traceback.format_exc()}"')
+            return None
+    return _groq_client
+
+# Gemini's response_schema uses UPPERCASE type names (its own convention); Groq's
+# json_schema uses standard lowercase JSON Schema types (OpenAI's convention) and
+# additionally requires additionalProperties to be set for strict validation. Two
+# separate schema constants because the wire formats genuinely differ, not because
+# the underlying shape does -- both describe the exact same {risky, reason} decision.
+GEMINI_RISK_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "risky": {"type": "BOOLEAN"},
+        "reason": {"type": "STRING"},
+    },
+    "required": ["risky", "reason"],
+}
+GROQ_RISK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "risky": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["risky", "reason"],
+    "additionalProperties": False,
+}
+
+_AI_SAFETY_BASE = (
+    "You are a pre-execution safety screen for a YouTube Live stream that is fully "
+    "automated and unmoderated in the moment -- viewer chat commands execute "
+    "immediately, live, with no human review before they happen. "
+)
+
+# !sr is a music request -- copyright is the only relevant risk there, so this stays
+# narrowly scoped to that alone.
+AI_SAFETY_SONG_INSTRUCTION = _AI_SAFETY_BASE + (
+    "Your ONLY job is to flag content that poses a REAL, meaningful risk of a "
+    "YouTube copyright claim/strike or channel-level enforcement action (e.g. "
+    "well-known copyrighted song titles or artists being queued for on-stream "
+    "playback). Do not flag generic, clearly non-infringing, or ambiguous content "
+    "-- when genuinely uncertain, do NOT flag it; this is a narrow safety net for "
+    "obvious cases, not a general content moderator, and over-flagging harmless "
+    "viewer requests defeats its purpose. Respond only with the requested JSON."
+)
+
+# !vr queues actual video playback live on stream, so this also screens for
+# inappropriate video content, not copyright alone.
+AI_SAFETY_VIDEO_INSTRUCTION = _AI_SAFETY_BASE + (
+    "Your job is to flag EITHER of two separate things about this video request: "
+    "(1) content that poses a REAL, meaningful risk of a YouTube copyright "
+    "claim/strike (e.g. well-known copyrighted movie/show titles being queued for "
+    "on-stream playback), OR (2) content that is sexual, graphic/violent, or "
+    "otherwise clearly inappropriate to play unsupervised on a public live stream "
+    "-- based on the title/URL/description given, not content you can't actually "
+    "see. Do not flag generic, harmless, or ambiguous requests -- when genuinely "
+    "uncertain, do NOT flag it; this is a narrow safety net for obvious cases, not "
+    "a general content moderator, and over-flagging harmless viewer requests "
+    "defeats its purpose. Respond only with the requested JSON."
+)
+
+# Typed/displayed text (!type, !send, !sendline, !typeenter, and any future
+# non-media command) is text that can end up literally executed on the machine
+# being controlled, not just displayed -- so this screens for destructive
+# commands and inappropriate browser navigation too, not copyright alone.
+AI_SAFETY_TEXT_INSTRUCTION = _AI_SAFETY_BASE + (
+    "Your job is to flag ANY of three separate things: "
+    "(1) content that poses a REAL, meaningful risk of a YouTube copyright "
+    "claim/strike (e.g. copyrighted lyrics/text being displayed on stream); "
+    "(2) commands or text that would cause REAL, meaningful DESTRUCTIVE harm if "
+    "executed on the machine being controlled -- e.g. deleting or overwriting "
+    "files/directories, formatting or wiping drives, disabling security software, "
+    "shutting down or corrupting the operating system, or similar commands run "
+    "through a shell/terminal/run-dialog that a reasonable operator would never "
+    "want a random anonymous viewer to be able to trigger unsupervised; or "
+    "(3) a link/URL/browser-navigation command aimed at sexual, graphic, or "
+    "otherwise clearly inappropriate content, INCLUDING when it looks like it's "
+    "being assembled a piece at a time across the 'RECENT COMMANDS' context "
+    "provided below and the new command together -- evaluate the recent commands "
+    "and the new one as a single combined sequence, not just the new command in "
+    "isolation, since a viewer can split an inappropriate link across several "
+    "separate messages specifically to evade a check that only looks at one "
+    "message at a time. "
+    "Do not flag generic, harmless, or ambiguous content -- when genuinely "
+    "uncertain, do NOT flag it; this is a narrow safety net for obvious cases, "
+    "not a general content moderator, and over-flagging harmless viewer input "
+    "defeats its purpose. Respond only with the requested JSON."
+)
+
+def _system_instruction_for(kind):
+    """song (!sr) stays copyright-only. video (!vr) also screens for inappropriate
+    video content. Everything else (typed/displayed text) also screens for
+    destructive commands and inappropriate browser-navigation links/chains."""
+    if kind == "song":
+        return AI_SAFETY_SONG_INSTRUCTION
+    elif kind == "video":
+        return AI_SAFETY_VIDEO_INSTRUCTION
+    return AI_SAFETY_TEXT_INSTRUCTION
+
+# Rolling history of recently typed/sent text, used so the "text" instruction above
+# can catch an inappropriate link/command being deliberately split across several
+# separate chat messages to evade a check that only ever looked at one message at a
+# time. Bounded by both count and age so it can't grow unbounded across a long
+# session, and old entries stop influencing new checks once they're no longer
+# plausibly part of the same in-progress chain.
+_RECENT_TEXT_HISTORY_MAX_ENTRIES = 8
+_RECENT_TEXT_HISTORY_MAX_AGE_SECONDS = 45
+_recent_typed_text = []   # list of (timestamp, text) tuples, oldest first
+
+def _record_and_get_recent_text_context(new_text):
+    """Appends new_text to the rolling history, trims anything too old or beyond the
+    max entry count, and returns a short context string of what came immediately
+    before it (oldest first) for the AI prompt -- empty string if there's no
+    relevant recent history yet."""
+    now = time.time()
+    _recent_typed_text.append((now, new_text))
+    while _recent_typed_text and (
+        len(_recent_typed_text) > _RECENT_TEXT_HISTORY_MAX_ENTRIES + 1
+        or now - _recent_typed_text[0][0] > _RECENT_TEXT_HISTORY_MAX_AGE_SECONDS
+    ):
+        _recent_typed_text.pop(0)
+    prior = [t for _, t in _recent_typed_text[:-1]]   # everything except the just-appended entry
+    if not prior:
+        return ""
+    joined = " | ".join(prior)
+    return f"RECENT COMMANDS (oldest first, for detecting a split/chained attempt): {joined}\n\n"
+
+def _generate_via_gemini(client, prompt, instruction):
+    """Returns the raw JSON text of the model's response, or raises on failure --
+    ai_check_risk handles the shared try/except/logging around whichever provider
+    function actually gets called.
+
+    thinking_level=LOW and a generous max_output_tokens matter specifically for
+    gemini-3.6-flash: it defaults to "medium" thinking, and thinking tokens are
+    billed/counted against the same output budget as the final answer -- the exact
+    same failure class discovered on the Groq side (a reasoning model exhausting a
+    low token budget before ever emitting the answer), just not yet hit here since
+    "medium" thinking is comparatively cheap for a prompt this short. LOW is enough
+    for a quick classification like this one; deep thinking isn't needed. temperature
+    is also deliberately omitted -- gemini-3.6-flash's own migration guidance says to
+    remove temperature/top_p/top_k from configs for this model rather than pass 0."""
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=_gemini_types.GenerateContentConfig(
+            system_instruction=instruction,
+            response_mime_type="application/json",
+            response_schema=GEMINI_RISK_SCHEMA,
+            max_output_tokens=1024,
+            thinking_config=_gemini_types.ThinkingConfig(thinking_level=_gemini_types.ThinkingLevel.LOW),
+        ),
+    )
+    if not (response.text or "").strip():
+        finish_reason = getattr(response.candidates[0], "finish_reason", None) if response.candidates else None
+        raise RuntimeError(f"Gemini returned an empty response (finish_reason={finish_reason}) -- "
+                            f"this should be rare with the current token budget.")
+    return response.text
+
+def _generate_via_groq(client, prompt, instruction):
+    """Same contract as _generate_via_gemini -- returns raw JSON text or raises.
+
+    reasoning_effort="low" and a generous max_tokens matter specifically for
+    openai/gpt-oss-120b: it's a reasoning model that spends tokens on internal
+    chain-of-thought BEFORE producing the final answer, and a low max_tokens (200,
+    what this used to be) can let it run out of budget mid-reasoning, returning
+    nothing at all -- Groq's own JSON-schema validation then rejects the empty
+    output with a 400, which is indistinguishable at a glance from an actual
+    validation failure. 'low' effort is enough for a quick classification like this
+    one; deep reasoning isn't needed here."""
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "copyright_risk_check", "schema": GROQ_RISK_SCHEMA},
+        },
+        temperature=0,
+        max_tokens=1024,
+        reasoning_effort="low",
+    )
+    choice = response.choices[0]
+    if choice.finish_reason == "length" and not (choice.message.content or "").strip():
+        raise RuntimeError("Groq ran out of tokens mid-reasoning before producing an "
+                            "answer (finish_reason=length, empty content) -- this "
+                            "should be rare with the current token budget.")
+    return choice.message.content or ""
+
+def ai_check_risk(text, kind="text"):
+    """Asks whichever provider is configured (Gemini or Groq) whether `text` poses a
+    meaningful risk if it were displayed, played, or executed live on a YouTube live
+    stream. For kind "song"/"video" (!sr/!vr media requests) this checks copyright
+    risk only. For any other kind -- "text" (!type/!send/!sendline/!typeenter) and
+    any future non-media command kind -- this ALSO checks for destructive commands
+    (e.g. file deletion, drive formatting, OS-damaging shell commands), since that
+    text can end up literally executed on the machine being controlled, not just
+    displayed. Returns (should_block: bool, reason: str).
+
+    Fails OPEN (returns should_block=False) on any error, timeout, or missing
+    configuration -- a broken safety check should never itself become the reason
+    legitimate commands stop working. This is explicitly a best-effort screen for
+    obvious cases, not a guarantee or a substitute for the streamer's own judgment.
+
+    Always prints exactly one [AI Safety] line per call, for every outcome (skipped,
+    allowed, blocked, or error) -- not just when something gets blocked, so it's
+    always possible to tell from the console whether this is actually running."""
+    if not gemini_config.get("enabled"):
+        print(f"[AI Safety] SKIPPED ({kind}) -- disabled in Perms tab. "
+              f"\"{(text or '')[:60]}\" was allowed unchecked.")
+        return False, "AI safety check skipped (disabled in Perms tab)"
+
+    provider = gemini_config.get("provider", "gemini")
+    if provider == "groq":
+        client = _get_groq_client()
+        generate = _generate_via_groq
+        label = "Groq"
+    else:
+        client = _get_gemini_client()
+        generate = _generate_via_gemini
+        label = "Gemini"
+
+    if client is None:
+        why = (f"{label} library not installed" if (not groq_available if provider == "groq" else not gemini_available)
+               else f"no {label} API key entered in Perms tab")
+        print(f"[AI Safety] SKIPPED ({kind}) -- {why}. \"{(text or '')[:60]}\" was allowed unchecked.")
+        return False, f"AI safety check skipped ({why})"
+
+    text = (text or "").strip()
+    if not text:
+        return False, "empty input"
+    kind_label = {
+        "song": "a viewer-requested SONG TITLE/URL a bot is about to queue and play live on stream",
+        "video": "a viewer-requested VIDEO TITLE/URL a bot is about to queue and play live on stream",
+        "text": "TEXT a bot is about to type/display live on stream",
+    }.get(kind, "content a bot is about to act on live on stream")
+    instruction = _system_instruction_for(kind)
+    history_context = _record_and_get_recent_text_context(text) if kind == "text" else ""
+    try:
+        raw = generate(client, f"{history_context}Evaluate this {kind_label}:\n\n{text}", instruction)
+        result = json.loads(raw)
+        risky = bool(result.get("risky", False))
+        reason = str(result.get("reason", "")).strip() or "(no reason given)"
+        verdict = "BLOCKED" if risky else "ALLOWED"
+        print(f"[AI Safety/{label}] {verdict} ({kind}): \"{text[:60]}\" -- {reason}")
+        return risky, reason
+    except Exception as e:
+        print(f'[AI Safety/{label}] CHECK ERROR ({kind}) -- failing open, "{text[:60]}" was allowed unchecked. '
+              f'Python exception: "{traceback.format_exc()}"')
+        return False, f"check failed, allowed by default: {e}"
+def save_autostart_everything_config(backend=None, vm=None, watchdog=None, test_mode=None,
+                                      os_voting_vm=None, os_voting_backend=None,
+                                      ai_safety_enabled=None, ai_safety_provider=None,
+                                      music_playback_enabled=None, video_playback_enabled=None):
+    """Persists backend, VM, Auto-Start Watchdog, Test Mode, last-active OS Voting
+    VM+backend, AI Safety screening enabled+provider, and automatic music/video
+    playback enabled to a single unified file so startup (or any relaunch -- update
+    or file replacement) can fully restore what was active before. The OS Voting
+    fields are separate from plain backend/vm because they need to survive
+    independently: os_voting_config.json already restores current_os_vm on its own,
+    but never the matching backend for that specific entry, which is the actual gap
+    this closes -- two OS Voting rows can each be on a different backend, so knowing
+    the VM name alone isn't enough to correctly resume it. AI Safety's and playback's
+    enabled fields are saved here too for visibility alongside everything else, but
+    gemini_config.json/music_config.json/video_config.json remain the authoritative
+    sources actually applied at startup (their own loads already run before the GUI
+    is built, which is earlier/more reliable timing than this file's own restore
+    step) -- this avoids multiple mechanisms racing to set the same checkbox.
+    Any argument left as None keeps whatever was already saved for that field, so a
+    caller that only changed one setting doesn't need to know or re-supply the rest --
+    this reads the existing file first and merges."""
+    try:
+        existing = {}
+        if os.path.exists(AUTOSTART_EVERYTHING_CONFIG_FILE):
+            try:
+                with open(AUTOSTART_EVERYTHING_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                pass   # corrupt/unreadable -- fine to start fresh below
+        data = {
+            "backend": backend if backend is not None else existing.get("backend", "vmware"),
+            "vm": vm if vm is not None else existing.get("vm", ""),
+            "auto_start_watchdog": watchdog if watchdog is not None else existing.get("auto_start_watchdog", False),
+            "test_mode": test_mode if test_mode is not None else existing.get("test_mode", False),
+            "os_voting_vm": os_voting_vm if os_voting_vm is not None else existing.get("os_voting_vm", ""),
+            "os_voting_backend": os_voting_backend if os_voting_backend is not None else existing.get("os_voting_backend", ""),
+            "ai_safety_enabled": ai_safety_enabled if ai_safety_enabled is not None else existing.get("ai_safety_enabled", False),
+            "ai_safety_provider": ai_safety_provider if ai_safety_provider is not None else existing.get("ai_safety_provider", "gemini"),
+            "music_playback_enabled": music_playback_enabled if music_playback_enabled is not None else existing.get("music_playback_enabled", False),
+            "video_playback_enabled": video_playback_enabled if video_playback_enabled is not None else existing.get("video_playback_enabled", False),
+        }
+        abs_path = os.path.abspath(AUTOSTART_EVERYTHING_CONFIG_FILE)
+        with open(AUTOSTART_EVERYTHING_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"[AutostartEverything] Saved {data} to {abs_path}")
+    except Exception as e:
+        print(f'[AutostartEverything] Save error: Python exception: "{traceback.format_exc()}"')
+
+def load_autostart_everything_config():
+    """Returns (backend, vm, watchdog, test_mode, os_voting_vm, os_voting_backend,
+    ai_safety_enabled, ai_safety_provider, music_playback_enabled,
+    video_playback_enabled) from the last saved state, or
+    ("vmware", "", False, False, "", "", False, "gemini", False, False) if none
+    exists yet (first-ever launch). ai_safety_enabled/ai_safety_provider/
+    music_playback_enabled/video_playback_enabled are returned for completeness but
+    are NOT applied by the startup restore logic -- see
+    save_autostart_everything_config's docstring for why their own dedicated config
+    files are the authoritative source for those specifically."""
+    abs_path = os.path.abspath(AUTOSTART_EVERYTHING_CONFIG_FILE)
+    try:
+        if os.path.exists(AUTOSTART_EVERYTHING_CONFIG_FILE):
+            with open(AUTOSTART_EVERYTHING_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            backend                = data.get("backend", "vmware")
+            vm                     = data.get("vm", "")
+            watchdog                = data.get("auto_start_watchdog", False)
+            test_mode              = data.get("test_mode", False)
+            os_voting_vm            = data.get("os_voting_vm", "")
+            os_voting_backend       = data.get("os_voting_backend", "")
+            ai_safety_enabled       = data.get("ai_safety_enabled", False)
+            ai_safety_provider      = data.get("ai_safety_provider", "gemini")
+            music_playback_enabled  = data.get("music_playback_enabled", False)
+            video_playback_enabled  = data.get("video_playback_enabled", False)
+            print(f"[AutostartEverything] Loaded backend={backend!r} vm={vm!r} "
+                  f"watchdog={watchdog!r} test_mode={test_mode!r} "
+                  f"os_voting_vm={os_voting_vm!r} os_voting_backend={os_voting_backend!r} "
+                  f"ai_safety_enabled={ai_safety_enabled!r} ai_safety_provider={ai_safety_provider!r} "
+                  f"music_playback_enabled={music_playback_enabled!r} "
+                  f"video_playback_enabled={video_playback_enabled!r} from {abs_path}")
+            return (backend, vm, watchdog, test_mode, os_voting_vm, os_voting_backend,
+                    ai_safety_enabled, ai_safety_provider,
+                    music_playback_enabled, video_playback_enabled)
+        else:
+            print(f"[AutostartEverything] No saved config found at {abs_path} -- using defaults.")
+    except Exception as e:
+        print(f'[AutostartEverything] Load error: Python exception: "{traceback.format_exc()}"')
+    return "vmware", "", False, False, "", "", False, "gemini", False, False
 
 VOTE_ACTION_COOLDOWN = 60          # seconds after a restart/revert before another can be voted
 
@@ -3558,7 +4285,7 @@ def load_reconnect_config():
             RECONNECT_CONFIG.update(data)
             print("[Reconnect] Config loaded.")
     except Exception as e:
-        print(f"[Reconnect] Load error: {e}")
+        print(f'[Reconnect] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_reconnect_config():
     try:
@@ -3566,7 +4293,7 @@ def save_reconnect_config():
             json.dump(RECONNECT_CONFIG, f, indent=2)
         print("[Reconnect] Config saved.")
     except Exception as e:
-        print(f"[Reconnect] Save error: {e}")
+        print(f'[Reconnect] Save error: Python exception: "{traceback.format_exc()}"')
 
 # Global reference to the GUI app instance — set when the app is created.
 # Used by background threads (bot loop, scheduler) to call GUI methods
@@ -3612,7 +4339,7 @@ def load_os_voting_config():
                     print(f"[OSVoting] Saved VM '{saved_vm}' no longer in OS list, ignoring.")
             print(f"[OSVoting] Config loaded. Enabled={OS_VOTING_ENABLED}, entries={len(OS_LIST)}")
     except Exception as e:
-        print(f"[OSVoting] Load error: {e}")
+        print(f'[OSVoting] Load error: Python exception: "{traceback.format_exc()}"')
         OS_VOTING_ENABLED = False
         OS_LIST = []
 
@@ -3628,7 +4355,7 @@ def save_os_voting_config():
             json.dump(data, f, indent=2, ensure_ascii=False)
         print(f"[OSVoting] Config saved. Enabled={OS_VOTING_ENABLED}, entries={len(OS_LIST)}, last_vm={current_os_vm}")
     except Exception as e:
-        print(f"[OSVoting] Save error: {e}")
+        print(f'[OSVoting] Save error: Python exception: "{traceback.format_exc()}"')
 
 def get_os_trigger_map():
     """Returns {trigger_lower: os_entry} for all valid, fully-configured OS entries."""
@@ -3756,7 +4483,7 @@ def update_os_vote_status():
         with open(OS_VOTE_STATUS_FILE, "w", encoding="utf-8") as f:
             f.write(html)
     except Exception as e:
-        print(f"[OSVoting] Status write error: {e}")
+        print(f'[OSVoting] Status write error: Python exception: "{traceback.format_exc()}"')
 
 def apply_current_os_scene():
     """If OS Voting is enabled, finds which configured OS the currently active VM
@@ -3778,7 +4505,95 @@ def apply_current_os_scene():
                     threading.Thread(target=obs_set_scene, args=(scene,), daemon=True).start()
                 break
     except Exception as e:
-        print(f"[OBS] apply_current_os_scene error: {e}")
+        print(f'[OBS] apply_current_os_scene error: Python exception: "{traceback.format_exc()}"')
+
+def _kill_backend_processes(vm_name, backend, nuclear=False):
+    """Force-kills the OS-level process(es) actually backing a specific VM -- used as
+    an escalation step when the backend's own stop/poweroff command hasn't actually
+    gotten the VM to stop within the allotted time. Targets only THIS VM's process by
+    matching its name/path in the process command line, not every VM under that
+    backend. nuclear=True additionally widens the match, for the final, most
+    aggressive tier."""
+    try:
+        pattern = re.escape(vm_name)
+        if backend == "vmware":
+            # vmware-vmx is the actual per-VM process; its command line includes the
+            # .vmx path, so this targets only this specific VM.
+            subprocess.run(["pkill", "-9", "-f", f"vmware-vmx.*{pattern}"],
+                            capture_output=True, timeout=10)
+            if nuclear:
+                subprocess.run(["pkill", "-9", "-f", f"vmware.*{pattern}"],
+                                capture_output=True, timeout=10)
+        elif backend == "vbox":
+            subprocess.run(["pkill", "-9", "-f", f"VBoxHeadless.*{pattern}"],
+                            capture_output=True, timeout=10)
+            subprocess.run(["pkill", "-9", "-f", f"VBoxSDL.*{pattern}"],
+                            capture_output=True, timeout=10)
+            if nuclear:
+                subprocess.run(["pkill", "-9", "-f", f"VirtualBoxVM.*{pattern}"],
+                                capture_output=True, timeout=10)
+    except Exception as e:
+        print(f'[Poweroff] Process-kill error: Python exception: "{traceback.format_exc()}"')
+
+def robust_vm_poweroff(vm_name, backend, source="Poweroff"):
+    """Escalating, verified shutdown for ANY backend -- this is the actual fix for VMs
+    not powering off when switching to a different one: the old logic fired a single
+    hard-stop command and just slept 3 seconds, with no check that it actually worked
+    before moving on to start the next VM. This instead:
+      1. Tries a graceful ACPI shutdown, then polls actual VM state for up to 15s.
+      2. If still running, does a force poweroff (hard stop) AND kills the specific
+         backend process for this VM, then polls for up to another 15s.
+      3. If STILL running, does a final nuclear pass: kills every related process for
+         this VM more broadly.
+    Returns True once the VM is confirmed stopped (or was never running to begin
+    with), False if even the nuclear tier didn't get it to stop."""
+    if not vm_name:
+        return True   # nothing to power off
+
+    def _confirm_stopped(timeout_s):
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if not vm_is_running(vm_name, backend):
+                return True
+            time.sleep(1)
+        return not vm_is_running(vm_name, backend)
+
+    if not vm_is_running(vm_name, backend):
+        return True   # already off
+
+    # Tier 1: graceful ACPI shutdown
+    print(f"[{source}] Requesting graceful shutdown of '{vm_name}' ({backend})...")
+    try:
+        _checked(vm_stop(vm_name, backend, hard=False))
+    except Exception as e:
+        print(f'[{source}] Graceful shutdown command error (continuing to escalate): '
+              f'Python exception: "{traceback.format_exc()}"')
+    if _confirm_stopped(15):
+        print(f"[{source}] '{vm_name}' confirmed stopped after graceful shutdown.")
+        return True
+
+    # Tier 2: force poweroff + kill this VM's specific backend process
+    print(f"[{source}] '{vm_name}' still running after 15s -- forcing poweroff.")
+    try:
+        _checked(vm_stop(vm_name, backend, hard=True))
+    except Exception as e:
+        print(f'[{source}] Force poweroff command error (continuing to escalate): '
+              f'Python exception: "{traceback.format_exc()}"')
+    _kill_backend_processes(vm_name, backend, nuclear=False)
+    if _confirm_stopped(15):
+        print(f"[{source}] '{vm_name}' confirmed stopped after force poweroff.")
+        return True
+
+    # Tier 3: nuclear -- kill everything related to this VM
+    print(f"[{source}] '{vm_name}' still running after force poweroff -- nuclear kill.")
+    _kill_backend_processes(vm_name, backend, nuclear=True)
+    if _confirm_stopped(10):
+        print(f"[{source}] '{vm_name}' confirmed stopped after nuclear kill.")
+        return True
+
+    log_error(source, f"Could not confirm '{vm_name}' ({backend}) stopped even after "
+                       f"graceful, force, and nuclear kill attempts.")
+    return False
 
 def switch_os(target_entry, announce=True):
     """
@@ -3815,13 +4630,11 @@ def switch_os(target_entry, announce=True):
         # rather than assuming, so it gets powered off with the right tool.
         if current_os_vm and current_os_vm != target_vm:
             previous_backend = get_backend_for_vm(current_os_vm)
-            ok, err = retry_vbox(
-                lambda: _checked(vm_stop(current_os_vm, previous_backend, hard=True)),
-                attempts=3, delay=3, source="OSVoting/poweroff"
-            )
+            ok = robust_vm_poweroff(current_os_vm, previous_backend, source="OSVoting/poweroff")
             if not ok:
-                log_error("OSVoting", f"Could not power off loser VM '{current_os_vm}' ({previous_backend}): {err}")
-            time.sleep(3)
+                log_error("OSVoting", f"Could not confirm loser VM '{current_os_vm}' "
+                                       f"({previous_backend}) fully powered off -- "
+                                       f"proceeding to start the target anyway.")
 
         # Step 2: start the winner, using ITS OWN configured backend
         ok, err = retry_vbox(
@@ -3960,15 +4773,74 @@ def speak_text(text):
             speaker.Volume = max(0, min(100, volume))
             speaker.Speak(text)
         except Exception as e:
-            print(f"[Speech] Error: {e}")
+            print(f'[Speech] Error: Python exception: "{traceback.format_exc()}"')
     threading.Thread(target=_speak, daemon=True).start()
 
+def _play_chime(note_freqs, note_duration=0.12, sample_rate=44100, volume=0.25):
+    """
+    Synthesizes a short chime as PCM audio (a quick arpeggio of sine-wave
+    notes with a soft fade-out on each note to avoid clicking) and plays it
+    asynchronously via the built-in winsound module. No external files or
+    audio libraries are required. Silently does nothing on non-Windows
+    platforms or if anything about audio playback fails.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import winsound
+        import struct
+        import math as _math
+        import tempfile
+
+        samples = []
+        for freq in note_freqs:
+            n = int(sample_rate * note_duration)
+            for i in range(n):
+                t = i / sample_rate
+                # Soft fade-out over the note's tail avoids an audible click.
+                fade = 1.0 if i < n * 0.7 else max(0.0, 1.0 - (i - n * 0.7) / (n * 0.3))
+                sample = _math.sin(2 * _math.pi * freq * t) * volume * fade
+                samples.append(int(sample * 32767))
+
+        pcm_data = struct.pack("<" + "h" * len(samples), *samples)
+
+        num_channels = 1
+        bits_per_sample = 16
+        byte_rate = sample_rate * num_channels * bits_per_sample // 8
+        block_align = num_channels * bits_per_sample // 8
+        data_size = len(pcm_data)
+
+        wav_header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", 36 + data_size, b"WAVE",
+            b"fmt ", 16, 1, num_channels, sample_rate,
+            byte_rate, block_align, bits_per_sample,
+            b"data", data_size,
+        )
+
+        tmp_path = os.path.join(
+            tempfile.gettempdir(),
+            f"_nexovative_chime_{int(time.time() * 1000) % 1000000}.wav"
+        )
+        with open(tmp_path, "wb") as f:
+            f.write(wav_header + pcm_data)
+
+        winsound.PlaySound(tmp_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+    except Exception as e:
+        print(f"[Splash] Could not play chime: {e}")
+
+
 def send_keyboard(text):
+    risky, reason = ai_check_risk(text, kind="text")
+    if risky:
+        console_log("WARN", f'[Gemini] Blocked typed text: "{text}" -- {reason}')
+        notify("Text Command Blocked", f"Gemini flagged a possible copyright risk: {reason}", timeout=8)
+        return
     try:
         subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'keyboardputstring', text], check=True)
         print(f"[KB] Typed: {text}")
     except Exception as e:
-        print(f"[KB] Error: {e}")
+        print(f'[KB] Error: Python exception: "{traceback.format_exc()}"')
 
 def send_scancode(scancode_str):
     try:
@@ -3977,7 +4849,7 @@ def send_scancode(scancode_str):
             subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'keyboardputscancode', byte], check=True)
             time.sleep(0.008)
     except Exception as e:
-        print(f"[Scancode] Error: {e}")
+        print(f'[Scancode] Error: Python exception: "{traceback.format_exc()}"')
 
 def send_special_enter():
     send_scancode('1c')
@@ -3988,7 +4860,7 @@ def play_success_sound():
     try:
         subprocess.Popen(['start', SUCCESS_SOUND_FILE], shell=True)
     except Exception as e:
-        print(f"[Sound] Error: {e}")
+        print(f'[Sound] Error: Python exception: "{traceback.format_exc()}"')
 
 def start_vm():
     try:
@@ -4001,7 +4873,7 @@ def start_vm():
         print("[VM] Started!")
     except Exception as e:
         update_status("VM is already running!")
-        print(f"[VM] Already running: {e}")
+        print(f'[VM] Already running: Python exception: "{traceback.format_exc()}"')
 
 def restore_window():
     try:
@@ -4023,7 +4895,25 @@ def unlock_session(session):
     if session.state == 2:   # 2 = Locked — only unlock when actually locked
         session.unlockMachine()
 
+_MOUSE_CLICK_COMMANDS = {"click", "lclick", "lc", "rclick", "rightclick", "rc",
+                         "mclick", "middleclick", "dclick", "tripleclick"}
+
 def handle_mouse(cmd, args):
+    action_desc = f"[mouse {cmd} {args}]".strip()
+    if cmd in _MOUSE_CLICK_COMMANDS:
+        # Only click-type commands actually trigger a full AI check -- a click is
+        # what would complete/submit a navigation (an address bar's Go, a link),
+        # whereas move/drag/scroll alone have no meaningful content to evaluate and
+        # are far too high-frequency to check individually without being needlessly
+        # slow/expensive. Still recorded into history below either way, so a
+        # subsequent text check can see the full recent sequence.
+        risky, reason = ai_check_risk(action_desc, kind="text")
+        if risky:
+            console_log("WARN", f'[Gemini] Blocked mouse action: "{action_desc}" -- {reason}')
+            notify("Mouse Command Blocked", f"AI safety flagged a possible risk: {reason}", timeout=8)
+            return
+    else:
+        _record_and_get_recent_text_context(action_desc)   # record only, no API call
     session = None
     try:
         mouse, session = get_mouse_and_session()
@@ -4100,7 +4990,7 @@ def handle_mouse(cmd, args):
             mouse.putMouseEvent(0,0,-amt,0,0)
         print(f"[Mouse] {cmd} {args}")
     except Exception as e:
-        print(f"[Mouse] Error: {e}")
+        print(f'[Mouse] Error: Python exception: "{traceback.format_exc()}"')
     finally:
         # Always release the session — even if the command raised an exception.
         # Skipping this locks the VirtualBox machine permanently until process restart.
@@ -4301,6 +5191,32 @@ def watchdog_restart():
 music_config_file = "music_config.json"
 video_config_file = "video_config.json"
 soundboard_config_file = "soundboard_config.json"
+fun_high_scores_file = "fun_high_scores.json"
+# Best-ever results across sessions for the Fun tab's tests/games. None means "not
+# set yet" for reaction_ms specifically (0 would incorrectly look like an
+# impossibly-fast real result); the others default sensibly to 0.
+fun_high_scores = {
+    "wpm": 0.0,
+    "accuracy": 0.0,
+    "cps": 0.0,
+    "reaction_ms": None,
+    "snake_score": 0,
+}
+
+def load_fun_high_scores():
+    global fun_high_scores
+    try:
+        if os.path.exists(fun_high_scores_file):
+            with open(fun_high_scores_file, "r", encoding="utf-8") as f:
+                fun_high_scores.update(json.load(f))
+        print(f"[FunTab] High scores loaded: {fun_high_scores}")
+    except Exception:
+        pass
+
+def save_fun_high_scores():
+    safe_json_dump(fun_high_scores_file, fun_high_scores)
+    print(f"[FunTab] High scores saved: {fun_high_scores}")
+
 
 # ---------------- Music panel (yt-dlp + python-vlc) ----------------
 MUSIC_SCHEDULE_MAX = 20
@@ -4359,7 +5275,7 @@ def _music_resolve_playlist_entries(url):
         elif isinstance(info, dict) and info.get("id"):
             urls.append(url)
     except Exception as e:
-        console_log("ERROR", f"[music] failed to list playlist {url}: {e}")
+        console_log("ERROR", f'[music] failed to list playlist {url}: Python exception: "{traceback.format_exc()}"')
     return urls
 
 def _music_resolve_stream(url):
@@ -4385,7 +5301,7 @@ def _music_resolve_stream(url):
         title = info.get("title") or url
         return stream_url, headers, title
     except Exception as e:
-        console_log("ERROR", f"[music] yt-dlp resolve failed for {url}: {e}")
+        console_log("ERROR", f'[music] yt-dlp resolve failed for {url}: Python exception: "{traceback.format_exc()}"')
         return None, None, None
 
 def _music_get_vlc_instance():
@@ -4394,7 +5310,7 @@ def _music_get_vlc_instance():
     if music_player is None:
         try: music_player = _vlc.Instance("--no-video", "--quiet", "--aout=any")
         except Exception as e:
-            console_log("ERROR", f"[music] vlc init failed: {e}")
+            console_log("ERROR", f'[music] vlc init failed: Python exception: "{traceback.format_exc()}"')
             return None
     return music_player
 
@@ -4421,6 +5337,11 @@ def _music_parse_request(raw):
 
 def queue_song_request(raw, user=""):
     """Queues a !sr request; it plays automatically the next time the music schedule advances."""
+    risky, reason = ai_check_risk(raw, kind="song")
+    if risky:
+        console_log("WARN", f"[Gemini] Blocked song request from {user}: \"{raw}\" -- {reason}")
+        notify("Song Request Blocked", f"Gemini flagged a possible copyright risk: {reason}", timeout=8)
+        return None
     url, is_playlist = _music_parse_request(raw)
     if not url: return None
     with music_lock:
@@ -4440,7 +5361,7 @@ def find_youtube_video_id(query):
         m = re.search(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
         return m.group(1) if m else None
     except Exception as e:
-        console_log("ERROR", f"[findsr] youtube search failed: {e}")
+        console_log("ERROR", f'[findsr] youtube search failed: Python exception: "{traceback.format_exc()}"')
         return None
 
 def _music_on_end_reached(event):
@@ -4707,7 +5628,7 @@ def _video_resolve_stream(url):
         title = info.get("title") or url
         return stream_url, headers, title
     except Exception as e:
-        console_log("ERROR", f"[video] yt-dlp resolve failed for {url}: {e}")
+        console_log("ERROR", f'[video] yt-dlp resolve failed for {url}: Python exception: "{traceback.format_exc()}"')
         return None, None, None
 
 def _video_get_vlc_instance():
@@ -4716,7 +5637,7 @@ def _video_get_vlc_instance():
     if video_player is None:
         try: video_player = _vlc.Instance("--quiet")
         except Exception as e:
-            console_log("ERROR", f"[video] vlc init failed: {e}")
+            console_log("ERROR", f'[video] vlc init failed: Python exception: "{traceback.format_exc()}"')
             return None
     return video_player
 
@@ -4751,6 +5672,11 @@ video_requests = []  # list of {"url": watch/playlist url, "is_playlist": bool, 
 
 def queue_video_request(raw, user=""):
     """Queues a !vr request; it plays automatically the next time the video schedule advances."""
+    risky, reason = ai_check_risk(raw, kind="video")
+    if risky:
+        console_log("WARN", f"[Gemini] Blocked video request from {user}: \"{raw}\" -- {reason}")
+        notify("Video Request Blocked", f"Gemini flagged a possible copyright risk: {reason}", timeout=8)
+        return None
     url, is_playlist = _video_parse_request(raw)
     if not url: return None
     with video_lock:
@@ -4832,7 +5758,7 @@ def _video_play_queue_current(watch_url, _attempt=1):
             elif plat == "Darwin": mp.set_nsobject(winid)
             else: mp.set_xwindow(winid)
         except Exception as e:
-            console_log("ERROR", f"[video] failed to bind video output to window: {e}")
+            console_log("ERROR", f'[video] failed to bind video output to window: Python exception: "{traceback.format_exc()}"')
         try: mp.audio_set_volume(int(video_config.get("volume", 90)))
         except Exception: pass
         ev = mp.event_manager()
@@ -5002,7 +5928,7 @@ def _soundboard_get_vlc_instance():
     if soundboard_vlc_instance is None:
         try: soundboard_vlc_instance = _vlc.Instance("--no-video", "--quiet", "--aout=any")
         except Exception as e:
-            console_log("ERROR", f"[soundboard] vlc init failed: {e}")
+            console_log("ERROR", f'[soundboard] vlc init failed: Python exception: "{traceback.format_exc()}"')
             return None
     return soundboard_vlc_instance
 
@@ -5028,7 +5954,7 @@ def _soundboard_web_search_first(query):
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
     except Exception as e:
-        console_log("ERROR", f"[soundboard] myinstants search failed: {e}")
+        console_log("ERROR", f'[soundboard] myinstants search failed: Python exception: "{traceback.format_exc()}"')
         return None, None
     # Each result button is onclick="play('/media/sounds/<file>.mp3','<id>')" -- the FIRST match
     # on the results page is the first search result (myinstants lists them in relevance order).
@@ -5058,7 +5984,7 @@ def _soundboard_web_fetch_by_id(instant_id):
         console_log("ERROR", f"[soundboard] myinstants id lookup failed ({e.code}): {instant_id}")
         return None, None
     except Exception as e:
-        console_log("ERROR", f"[soundboard] myinstants id lookup failed: {e}")
+        console_log("ERROR", f'[soundboard] myinstants id lookup failed: Python exception: "{traceback.format_exc()}"')
         return None, None
     m = re.search(r"onclick=\"play\('([^']+)'", html)
     if not m:
@@ -5210,7 +6136,7 @@ def _gtts_get_vlc_instance():
     if gtts_vlc_instance is None:
         try: gtts_vlc_instance = _vlc.Instance("--no-video", "--quiet", "--aout=any")
         except Exception as e:
-            console_log("ERROR", f"[gtts] vlc init failed: {e}")
+            console_log("ERROR", f'[gtts] vlc init failed: Python exception: "{traceback.format_exc()}"')
             return None
     return gtts_vlc_instance
 
@@ -5312,21 +6238,21 @@ def vm_shutdown_hard_kill():
 
 def vm_pause():
     if current_vm_backend == "vmware":
-        return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'pause', VM_NAME], check=True),
+        return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'pause', VM_NAME], check=True, timeout=20),
                            source="Cmd/pausevm")
     return retry_vbox(lambda: subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'pause'], check=True),
                        source="Cmd/pausevm")
 
 def vm_unpause():
     if current_vm_backend == "vmware":
-        return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'unpause', VM_NAME], check=True),
+        return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'unpause', VM_NAME], check=True, timeout=20),
                            source="Cmd/resumevm")
     return retry_vbox(lambda: subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'resume'], check=True),
                        source="Cmd/resumevm")
 
 def vm_save_state():
     if current_vm_backend == "vmware":
-        return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'suspend', VM_NAME], check=True),
+        return retry_vbox(lambda: subprocess.run([VMRUN_PATH, '-T', VMRUN_TARGET_TYPE, 'suspend', VM_NAME], check=True, timeout=30),
                            source="Cmd/vmsavestate")
     return retry_vbox(lambda: subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'savestate'], check=True),
                        source="Cmd/vmsavestate")
@@ -5699,6 +6625,7 @@ class YouTubeChatBot:
                     msg      = c.message.strip()
                     user     = normalize_username(c.author.name)
                     is_owner = getattr(c.author, 'isChatOwner', False)
+                    is_mod   = is_owner or getattr(c.author, 'isChatModerator', False) or user == ADMIN_USERNAME.lower()
                     update_overlay(author=user, message=msg, msg_id=c.id)
                     if user in banned_users:
                         if time.time() < banned_users[user]: continue
@@ -5756,9 +6683,9 @@ class YouTubeChatBot:
                                     if os_switch_in_progress:
                                         continue
                                     target_entry = os_trigger_map[cmd]
-                                    # Owner bypass: switch immediately, no vote needed
-                                    if is_owner:
-                                        print(f"[OSVoting] Switch bypassed by owner: {user} → {target_entry['name']}")
+                                    # Mod/owner bypass: switch immediately, no vote needed
+                                    if is_mod:
+                                        print(f"[OSVoting] Switch bypassed by {'owner' if is_owner else 'mod'}: {user} → {target_entry['name']}")
                                         threading.Thread(target=switch_os, args=(target_entry,), daemon=True).start()
                                         continue
                                     if target_entry.get("vm") == current_os_vm:
@@ -6086,9 +7013,9 @@ class YouTubeChatBot:
                                     print(f"[Vote] Restart on cooldown ({remaining_cd}s left)")
                                     _append_event("COOLDOWN", user, f"restart blocked — {remaining_cd}s left")
                                     continue
-                                # Owner bypass: skip vote, execute immediately
-                                if is_owner:
-                                    print(f"[Vote] Restart bypassed by owner: {user}")
+                                # Mod/owner bypass: skip vote, execute immediately
+                                if is_mod:
+                                    print(f"[Vote] Restart bypassed by {'owner' if is_owner else 'mod'}: {user}")
                                     speak_text("Restarting Virtual Machine...")
                                     vote_restart.clear(); restart_start_time=None; active_users.clear()
                                     restart_in_progress = True
@@ -6153,9 +7080,9 @@ class YouTubeChatBot:
                                     print(f"[Vote] Revert on cooldown ({remaining_cd}s left)")
                                     _append_event("COOLDOWN", user, f"revert blocked — {remaining_cd}s left")
                                     continue
-                                # Owner bypass: skip vote, execute immediately
-                                if is_owner:
-                                    print(f"[Vote] Revert bypassed by owner: {user}")
+                                # Mod/owner bypass: skip vote, execute immediately
+                                if is_mod:
+                                    print(f"[Vote] Revert bypassed by {'owner' if is_owner else 'mod'}: {user}")
                                     speak_text("Reverting Virtual Machine...")
                                     vote_revert.clear(); revert_start_time=None; active_users.clear()
                                     revert_in_progress = True
@@ -6506,9 +7433,9 @@ class YouTubeChatBot:
                                     if os_switch_in_progress:
                                         continue
                                     target_entry = os_trigger_map[cmd]
-                                    # Owner bypass: switch immediately, no vote needed
-                                    if is_owner:
-                                        print(f"[OSVoting] Switch bypassed by owner: {user} → {target_entry['name']}")
+                                    # Mod/owner bypass: switch immediately, no vote needed
+                                    if is_mod:
+                                        print(f"[OSVoting] Switch bypassed by {'owner' if is_owner else 'mod'}: {user} → {target_entry['name']}")
                                         threading.Thread(target=switch_os, args=(target_entry,), daemon=True).start()
                                         continue
                                     if target_entry.get("vm") == current_os_vm:
@@ -6870,9 +7797,9 @@ class YouTubeChatBot:
                                     print(f"[Vote] Restart on cooldown ({remaining_cd}s left)")
                                     _append_event("COOLDOWN", user, f"restart blocked — {remaining_cd}s left")
                                     continue
-                                # Owner bypass: skip vote, execute immediately
-                                if is_owner:
-                                    print(f"[Vote] Restart bypassed by owner: {user}")
+                                # Mod/owner bypass: skip vote, execute immediately
+                                if is_mod:
+                                    print(f"[Vote] Restart bypassed by {'owner' if is_owner else 'mod'}: {user}")
                                     speak_text("Restarting Virtual Machine...")
                                     vote_restart.clear(); restart_start_time=None; active_users.clear()
                                     restart_in_progress = True
@@ -6946,9 +7873,9 @@ class YouTubeChatBot:
                                     print(f"[Vote] Revert on cooldown ({remaining_cd}s left)")
                                     _append_event("COOLDOWN", user, f"revert blocked — {remaining_cd}s left")
                                     continue
-                                # Owner bypass: skip vote, execute immediately
-                                if is_owner:
-                                    print(f"[Vote] Revert bypassed by owner: {user}")
+                                # Mod/owner bypass: skip vote, execute immediately
+                                if is_mod:
+                                    print(f"[Vote] Revert bypassed by {'owner' if is_owner else 'mod'}: {user}")
                                     speak_text("Reverting Virtual Machine...")
                                     vote_revert.clear(); revert_start_time=None; active_users.clear()
                                     revert_in_progress = True
@@ -7104,7 +8031,7 @@ class YouTubeChatBotSecondary:
             self.chat = pytchat.create(video_id=self.video_id)
             return True
         except Exception as e:
-            print(f"[MultiStream] Reconnect error ({self.video_id}): {e}")
+            print(f'[MultiStream] Reconnect error ({self.video_id}): Python exception: "{traceback.format_exc()}"')
             return False
 
     def run(self):
@@ -7245,7 +8172,7 @@ class YouTubeChatBotSecondary:
                                                   args=("Video Queue", video_requests, video_queue),
                                                   daemon=True).start()
                         except Exception as e:
-                            print(f"[MultiStream] Command error: {e}")
+                            print(f'[MultiStream] Command error: Python exception: "{traceback.format_exc()}"')
             except Exception as e:
                 if not bot_stop_event.is_set():
                     print(f"[MultiStream:{self.video_id}] Error: {e} → reconnecting...")
@@ -7360,7 +8287,23 @@ class UltraBotGUI:
         self.root.configure(bg=self.BG)
         self.root.resizable(True, True)
         # Open maximized (windowed fullscreen — not borderless, still has taskbar/titlebar)
-        self.root.state("zoomed")
+        try:
+            self.root.state("zoomed")   # works on Windows and macOS's Aqua Tk build
+        except Exception:
+            # "zoomed" isn't a valid Tk window state on Linux's X11 Tk build at all --
+            # state() there only accepts normal/iconic/withdrawn, so it raises TclError
+            # rather than just not maximizing. -zoomed is the X11-native equivalent,
+            # honored by virtually all EWMH-compliant window managers (which is to say,
+            # nearly all of them).
+            try:
+                self.root.attributes("-zoomed", True)
+            except Exception:
+                # Last-resort fallback for the rare window manager that supports neither --
+                # just size the window to the full screen manually.
+                try:
+                    self.root.geometry(f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0")
+                except Exception:
+                    pass   # give up gracefully -- a normal-sized window beats a crash
         self.root.minsize(900, 600)
 
         self._bot_thread   = None
@@ -7382,14 +8325,72 @@ class UltraBotGUI:
         self._build_styles()
         load_os_voting_config()
         load_auto_start_config()
+        load_gemini_config()
         load_obs_config()
         load_permissions_config()
         load_sound_config()
         load_multi_stream_config()
         load_scheduler_config()
+        load_music_config()
+        load_video_config()
+        load_soundboard_config()
+        load_fun_high_scores()
         self._build_ui()
+        self._setup_konami_code_listener()
         load_custom_commands()
         self._refresh_cmd_list()
+
+        # Restore backend/VM/watchdog/test-mode so a fresh launch (or any relaunch --
+        # update or file replacement) doesn't silently lose what was active before.
+        # Applies to both the GUI widgets AND the global current_vm_backend/VM_NAME
+        # directly, so it's correct immediately, before the user needs to touch
+        # anything or click Start Bot first.
+        global current_vm_backend, VM_NAME, current_os_vm
+        (saved_backend, saved_vm, saved_watchdog, saved_test_mode,
+         saved_osv_vm, saved_osv_backend,
+         _saved_ai_safety_enabled, _saved_ai_safety_provider,
+         _saved_music_playback_enabled, _saved_video_playback_enabled) = load_autostart_everything_config()
+        # _saved_ai_safety_enabled/_saved_ai_safety_provider/_saved_music_playback_enabled/
+        # _saved_video_playback_enabled are intentionally unused here -- gemini_config.json/
+        # music_config.json/video_config.json (all loaded earlier, before _build_ui()) are the
+        # authoritative source actually applied to the GUI/behavior. These are only
+        # saved in this file for visibility alongside everything else restored here.
+        if saved_backend in ("vmware", "vbox"):
+            self._vm_backend_var.set(saved_backend)
+            current_vm_backend = saved_backend
+            self._on_vm_backend_changed()   # repopulates the VM dropdown for this backend
+            if saved_vm:
+                self._vm_var.set(saved_vm)
+                VM_NAME = saved_vm
+                current_os_vm = saved_vm
+            self._log(f"[AutostartEverything] Restored: backend={saved_backend}, "
+                      f"vm={saved_vm or '(none)'}, watchdog={saved_watchdog}, test_mode={saved_test_mode}")
+
+        # If OS Voting is enabled and there's a saved last-active OS Voting VM, restore
+        # IT (and its own backend, together) as the higher-priority source of truth --
+        # a specific OS Voting entry can be on a different backend than the plain
+        # backend/vm fields above, so restoring just the VM name without its matching
+        # backend (which is what the older os_voting_config.json mechanism alone does)
+        # could otherwise pair the right VM with the wrong tool.
+        if OS_VOTING_ENABLED and saved_osv_vm:
+            valid_vms = [e.get("vm", "") for e in OS_LIST if e.get("vm")]
+            if saved_osv_vm in valid_vms:
+                current_os_vm = saved_osv_vm
+                VM_NAME = saved_osv_vm
+                if saved_osv_backend in ("vmware", "vbox"):
+                    current_vm_backend = saved_osv_backend
+                self._log(f"[AutostartEverything] Restored OS Voting VM: {saved_osv_vm} "
+                          f"(backend: {saved_osv_backend or current_vm_backend})")
+
+        self._auto_start_var.set(bool(saved_watchdog))
+
+        if saved_test_mode and saved_vm:
+            # Re-enter Test Mode automatically, same as AutoStart resumes the bot's
+            # YouTube connection -- only if a VM was actually restored to target,
+            # otherwise _on_test_mode_toggle()'s own validation would just reject it.
+            self._test_mode_var.set(True)
+            self.root.after(500, self._on_test_mode_toggle)
+
 
     # ── TTK Styles ──
     def _make_context_menu(self, widget, is_text=False):
@@ -7515,9 +8516,13 @@ class UltraBotGUI:
         title_bar = tk.Frame(self.root, bg=self.BG2, height=48)
         title_bar.pack(fill="x", side="top")
         title_bar.pack_propagate(False)
-        tk.Label(title_bar, text="🤖  UltraBot Control Panel",
+        self._title_label = tk.Label(title_bar, text="🤖  UltraBot Control Panel",
                  bg=self.BG2, fg=self.TEXT,
-                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=16, pady=8)
+                 font=("Segoe UI", 13, "bold"), cursor="hand2")
+        self._title_label.pack(side="left", padx=16, pady=8)
+        self._title_click_count = 0
+        self._title_click_reset_job = None
+        self._title_label.bind("<Button-1>", self._on_title_click)
         self._status_dot = tk.Label(title_bar, text="⬤  Stopped",
                                     bg=self.BG2, fg=self.RED,
                                     font=("Segoe UI", 10, "bold"))
@@ -7588,44 +8593,48 @@ class UltraBotGUI:
         self.root.bind("<Control-Tab>",       lambda e: nb.select((nb.index("current") + 1) % nb.index("end")))
         self.root.bind("<Control-Shift-Tab>", lambda e: nb.select((nb.index("current") - 1) % nb.index("end")))
 
-        tab1 = ttk.Frame(nb)
-        tab2 = ttk.Frame(nb)
-        tab3 = ttk.Frame(nb)
-        tab4 = ttk.Frame(nb)
-        tab5 = ttk.Frame(nb)
-        tab6 = ttk.Frame(nb)
-        tab7 = ttk.Frame(nb)
-        tab8 = ttk.Frame(nb)
-        tab9  = ttk.Frame(nb)
-        tab10 = ttk.Frame(nb)
-        tab11 = ttk.Frame(nb)
-        tab12 = ttk.Frame(nb)
-        tab13 = ttk.Frame(nb)
-        tab14 = ttk.Frame(nb)
-        tab15 = ttk.Frame(nb)
-        tab16 = ttk.Frame(nb)
-        tab17 = ttk.Frame(nb)
-        tab18 = ttk.Frame(nb)
-        tab19 = ttk.Frame(nb)
-        nb.add(tab1,  text="▶ Main")
-        nb.add(tab2,  text="⚙ Cmds")
-        nb.add(tab3,  text="🖥 VM")
-        nb.add(tab4,  text="🗳 OS Vote")
-        nb.add(tab5,  text="🎨 Theme")
-        nb.add(tab6,  text="📡 OBS")
-        nb.add(tab7,  text="📊 Stats")
-        nb.add(tab8,  text="🚫 Users")
-        nb.add(tab9,  text="📋 Log")
-        nb.add(tab10, text="🔒 Perms")
-        nb.add(tab11, text="🔊 Sound")
-        nb.add(tab12, text="🌐 Streams")
-        nb.add(tab13, text="📅 Sched")
+        tab1_outer, tab1 = self._make_scrollable_tab(nb)
+        tab2_outer, tab2 = self._make_scrollable_tab(nb)
+        tab3_outer, tab3 = self._make_scrollable_tab(nb)
+        tab4 = ttk.Frame(nb)   # already has its own internal Canvas+Scrollbar
+        tab5_outer, tab5 = self._make_scrollable_tab(nb)
+        tab6 = ttk.Frame(nb)   # already has its own internal Canvas+Scrollbar
+        tab7_outer, tab7 = self._make_scrollable_tab(nb)
+        tab8_outer, tab8 = self._make_scrollable_tab(nb)
+        tab9_outer, tab9 = self._make_scrollable_tab(nb)
+        tab10_outer, tab10 = self._make_scrollable_tab(nb)
+        tab11_outer, tab11 = self._make_scrollable_tab(nb)
+        tab12_outer, tab12 = self._make_scrollable_tab(nb)
+        tab13_outer, tab13 = self._make_scrollable_tab(nb)
+        tab14 = ttk.Frame(nb)   # already has its own internal Canvas+Scrollbar
+        tab15_outer, tab15 = self._make_scrollable_tab(nb)
+        tab16_outer, tab16 = self._make_scrollable_tab(nb)
+        tab17_outer, tab17 = self._make_scrollable_tab(nb)
+        tab18_outer, tab18 = self._make_scrollable_tab(nb)
+        tab19_outer, tab19 = self._make_scrollable_tab(nb)
+        nb.add(tab1_outer, text="▶ Main")
+        nb.add(tab2_outer, text="⚙ Cmds")
+        nb.add(tab3_outer, text="🖥 VM")
+        nb.add(tab4, text="🗳 OS Vote")
+        nb.add(tab5_outer, text="🎨 Theme")
+        nb.add(tab6, text="📡 OBS")
+        nb.add(tab7_outer, text="📊 Stats")
+        nb.add(tab8_outer, text="🚫 Users")
+        nb.add(tab9_outer, text="📋 Log")
+        nb.add(tab10_outer, text="🔒 Perms")
+        nb.add(tab11_outer, text="🔊 Sound")
+        nb.add(tab12_outer, text="🌐 Streams")
+        nb.add(tab13_outer, text="📅 Sched")
         nb.add(tab14, text="🖱 Real PC")
-        nb.add(tab15, text="🔄 Reconnect")
-        nb.add(tab16, text="🎵 Music")
-        nb.add(tab17, text="🎬 Video")
-        nb.add(tab18, text="🔉 Soundboard")
-        nb.add(tab19, text="🌐 Web")
+        nb.add(tab15_outer, text="🔄 Reconnect")
+        nb.add(tab16_outer, text="🎵 Music")
+        nb.add(tab17_outer, text="🎬 Video")
+        nb.add(tab18_outer, text="🔉 Soundboard")
+        nb.add(tab19_outer, text="🌐 Web")
+
+        self.nb = nb   # kept for dynamic tab insertion (e.g. the hidden Fun tab easter egg)
+        self._fun_tab_anchor = tab15_outer   # Fun tab is inserted right before this one
+        self._reveal_fun_tab(celebrate=False)   # always visible now, no unlock requirement
 
         self._build_main_tab(tab1)
         self._build_cmd_builder_tab(tab2)
@@ -7693,6 +8702,77 @@ class UltraBotGUI:
 
         nb.bind("<<NotebookTabChanged>>", _on_tab_changed)
 
+
+    def _make_scrollable_tab(self, notebook):
+        """Wraps a new notebook tab in a vertically-scrollable container (Canvas + inner
+        Frame + Scrollbar) and returns (outer_frame_for_notebook, inner_frame_to_populate).
+        Existing _build_*_tab(parent) methods don't need any changes -- they just receive
+        this inner frame as their "parent" and pack/grid into it exactly as before; the
+        scrolling is entirely handled by this wrapper, transparent to the tab's own code.
+
+        Mousewheel binding covers all 3 platforms: Windows/macOS fire <MouseWheel> with
+        event.delta (positive = up), Linux/X11 fires discrete <Button-4>/<Button-5>
+        events instead with no delta at all. Binding is scoped to only fire while the
+        mouse is actually over this tab's content (bound/unbound on <Enter>/<Leave> of
+        the canvas), so scrolling one tab doesn't scroll a different one, and so it
+        doesn't steal wheel events meant for a nested Treeview/Listbox/Text widget that
+        already has its own scrolling."""
+        outer = ttk.Frame(notebook)
+        canvas = tk.Canvas(outer, bg=self.BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)   # ttk, not tk -- so tab-builders can still call parent.configure(style=...) on it, and "TFrame" style already carries the correct dark background (self.BG) by default
+
+        inner_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=vscroll.set)
+
+        def _on_inner_configure(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        inner.bind("<Configure>", _on_inner_configure)
+
+        def _on_canvas_configure(event):
+            # Keep the inner frame's width matched to the canvas's visible width so
+            # widgets packed with fill="x" actually span the full tab, not just
+            # whatever width their own content happens to need.
+            canvas.itemconfig(inner_window, width=event.width)
+            # Also stretch the inner frame's height to AT LEAST the canvas's own
+            # visible height -- without this, expand=True children (like a tab's
+            # top-level PanedWindow) have nothing real to expand into, since a canvas
+            # window item only ever sizes to its content's own natural height, not
+            # "whatever's visible". This is what actually let those children collapse
+            # toward zero in the first place. Using max() here, not a flat height,
+            # means content that's genuinely TALLER than the visible area still grows
+            # past it and scrolls correctly -- this only fills unused space on a tab
+            # that's shorter than the window, it never truncates a tab that's taller.
+            natural_height = inner.winfo_reqheight()
+            canvas.itemconfig(inner_window, height=max(event.height, natural_height))
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            if event.num == 4:      # Linux/X11 scroll up
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:    # Linux/X11 scroll down
+                canvas.yview_scroll(1, "units")
+            elif getattr(event, "delta", 0):   # Windows/macOS
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+        def _bind_wheel(event=None):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Button-4>", _on_mousewheel)
+            canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_wheel(event=None):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        return outer, inner
+
     # ──────────────── TAB 1 : MAIN ────────────────
     def _build_main_tab(self, parent):
         parent.configure(style="TFrame")
@@ -7745,6 +8825,8 @@ class UltraBotGUI:
         self._vm_combo = ttk.Combobox(card, textvariable=self._vm_var,
                                       state="readonly", width=30,
                                       font=("Segoe UI",10))
+        self._vm_combo.bind("<<ComboboxSelected>>",
+                             lambda e: save_autostart_everything_config(backend=current_vm_backend, vm=self._vm_var.get().strip()))
         self._vm_combo.grid(row=2, column=1, sticky="ew", padx=(0,12),
                             pady=(10,0), ipady=3)
         ttk.Button(card, text="🔄 Refresh", style="Dim.TButton",
@@ -9086,7 +10168,7 @@ class UltraBotGUI:
             except Exception as e:
                 err_msg = f"Error: {e}"
                 self.root.after(0, lambda msg=err_msg: self._vm_set_last(msg, self.RED))
-                print(f"[VM] Start error: {e}")
+                print(f'[VM] Start error: Python exception: "{traceback.format_exc()}"')
         threading.Thread(target=run, daemon=True).start()
 
     def _vm_restart(self):
@@ -9111,7 +10193,7 @@ class UltraBotGUI:
             except Exception as e:
                 err_msg = f"Error: {e}"
                 self.root.after(0, lambda msg=err_msg: self._vm_set_last(msg, self.RED))
-                print(f"[VM] Restart error: {e}")
+                print(f'[VM] Restart error: Python exception: "{traceback.format_exc()}"')
         threading.Thread(target=run, daemon=True).start()
 
     def _vm_revert(self):
@@ -9147,7 +10229,7 @@ class UltraBotGUI:
                 update_status("Revert failed")
                 err_msg = f"Error: {e}"
                 self.root.after(0, lambda msg=err_msg: self._vm_set_last(msg, self.RED))
-                print(f"[VM] Revert error: {e}")
+                print(f'[VM] Revert error: Python exception: "{traceback.format_exc()}"')
             finally:
                 revert_start_time = None
                 revert_in_progress = False
@@ -9173,7 +10255,7 @@ class UltraBotGUI:
             except Exception as e:
                 err_msg = f"Error: {e}"
                 self.root.after(0, lambda msg=err_msg: self._vm_set_last(msg, self.RED))
-                print(f"[VM] Shutdown error: {e}")
+                print(f'[VM] Shutdown error: Python exception: "{traceback.format_exc()}"')
         threading.Thread(target=run, daemon=True).start()
 
     # ──────────────── Helpers ────────────────
@@ -9232,8 +10314,13 @@ class UltraBotGUI:
     # ──────────────── VM List ────────────────
     def _on_vm_backend_changed(self):
         """Swaps the VM field's label, the .vmx registration row's visibility, and
-        populates the combo from the right source for whichever backend is selected."""
+        populates the combo from the right source for whichever backend is selected.
+        Also saves the selection to autostarteverything.json so it's remembered on
+        the next launch/relaunch instead of silently defaulting back to vbox every
+        time."""
+        global current_vm_backend
         backend = self._vm_backend_var.get()
+        current_vm_backend = backend
         if backend == "vmware":
             self._vm_field_label.configure(text="VMware .vmx Path")
             self._vmx_browse_row.grid()
@@ -9245,6 +10332,7 @@ class UltraBotGUI:
         self._vm_combo['values'] = vms
         if vms:
             self._vm_combo.current(0)
+        save_autostart_everything_config(backend=current_vm_backend, vm=self._vm_var.get().strip())
 
     def _add_vmware_vmx_entry(self):
         vmx = self._reg_vmx_var.get().strip().strip('"').strip("'")
@@ -9301,12 +10389,12 @@ class UltraBotGUI:
                     self._log("[TestMode] Stopped.")
                     return
         except Exception as e:
-            print(f"[TestMode] poll error: {e}")
+            print(f'[TestMode] poll error: Python exception: "{traceback.format_exc()}"')
         if TEST_MODE_ENABLED:
             self.root.after(150, self._test_mode_poll_stdin)
 
     def _on_test_mode_toggle(self):
-        global TEST_MODE_ENABLED, VM_NAME, current_os_vm
+        global TEST_MODE_ENABLED, VM_NAME, current_os_vm, current_vm_backend
         enabled = self._test_mode_var.get()
         TEST_MODE_ENABLED = enabled
 
@@ -9314,7 +10402,7 @@ class UltraBotGUI:
             vm = self._vm_var.get().strip()
             if not vm and not (OS_VOTING_ENABLED and OS_LIST):
                 messagebox.showerror("Missing VM",
-                    "Please select a VirtualBox VM before enabling Test Mode.")
+                    "Please select a VM before enabling Test Mode.")
                 self._test_mode_var.set(False)
                 TEST_MODE_ENABLED = False
                 return
@@ -9324,15 +10412,20 @@ class UltraBotGUI:
                 self._test_mode_var.set(False)
                 TEST_MODE_ENABLED = False
                 return
-            # Set VM target
+            # Set VM target AND backend -- current_vm_backend was never set here at
+            # all before, so regardless of what the user picked in the GUI, it
+            # silently stayed at whatever it was before, meaning every VM command in
+            # Test Mode could dispatch to the wrong tool entirely.
             if OS_VOTING_ENABLED:
                 valid = [e for e in OS_LIST if e.get("vm")]
                 if valid:
                     VM_NAME = valid[0]["vm"]
                     current_os_vm = VM_NAME
+                    current_vm_backend = valid[0].get("backend", "vbox")
             else:
                 VM_NAME = vm
                 current_os_vm = vm
+                current_vm_backend = self._vm_backend_var.get() if hasattr(self, "_vm_backend_var") else "vbox"
             # Start background threads needed for VM control
             bot_stop_event.clear()
             threading.Thread(target=watchdog_restart,       daemon=True).start()
@@ -9347,13 +10440,15 @@ class UltraBotGUI:
             else:
                 threading.Thread(target=run_test_mode, daemon=True).start()
             self._set_status("Test Mode", self.YELLOW)
-            self._log(f"[TestMode] Started. VM: {VM_NAME}. Type commands in the console.")
+            self._log(f"[TestMode] Started. VM: {VM_NAME} (backend: {current_vm_backend}). Type commands in the console.")
             notify("Test Mode Active", f"VM: {VM_NAME}\nType commands in the console window.")
+            save_autostart_everything_config(backend=current_vm_backend, vm=VM_NAME, test_mode=True)
         else:
             bot_stop_event.set()
             self._set_status("Stopped", self.RED)
             self._log("[TestMode] Stopped.")
             notify("Test Mode Stopped", "Test mode has been disabled.")
+            save_autostart_everything_config(test_mode=False)
 
     def _start_bot(self):
         global VIDEO_ID, VM_NAME, current_os_vm, current_vm_backend
@@ -9440,7 +10535,7 @@ class UltraBotGUI:
                             _multi_stream_bots.append(extra_bot)
                             extra_bot.run()
                         except Exception as e:
-                            print(f"[MultiStream] Error for {vid}: {e}")
+                            print(f'[MultiStream] Error for {vid}: Python exception: "{traceback.format_exc()}"')
                     threading.Thread(target=_run_extra, daemon=True).start()
                     print(f"[MultiStream] Started listener for extra stream: {extra_vid}")
             if bot.chat and bot.chat.is_alive():
@@ -9448,7 +10543,7 @@ class UltraBotGUI:
             else:
                 print("[Bot] Chat connection failed at startup.")
         except Exception as e:
-            print(f"[Bot] Fatal error: {e}")
+            print(f'[Bot] Fatal error: Python exception: "{traceback.format_exc()}"')
             notify("Bot Crashed", f"Fatal error: {e}", timeout=8)
         finally:
             self._bot_instance = None
@@ -9487,7 +10582,7 @@ class UltraBotGUI:
             try:
                 self._bot_instance.chat.terminate()
             except Exception as e:
-                print(f"[Bot] Error terminating chat connection: {e}")
+                print(f'[Bot] Error terminating chat connection: Python exception: "{traceback.format_exc()}"')
         self._bot_running = False
         if self._console_redir:
             self._console_redir.stop()
@@ -9524,7 +10619,7 @@ class UltraBotGUI:
                     apply_current_os_scene()
                 except Exception as e:
                     update_status("Restart failed")
-                    print(f"[Admin] Restart error: {e}")
+                    print(f'[Admin] Restart error: Python exception: "{traceback.format_exc()}"')
             elif c.startswith('!speak '):
                 speak_text(cmd[7:].strip())
             elif c == '!revert':
@@ -9546,7 +10641,7 @@ class UltraBotGUI:
                     update_votes_json("revert", 0, 2, 0)
                 except Exception as e:
                     update_status("Revert failed")
-                    print(f"[Admin] Revert error: {e}")
+                    print(f'[Admin] Revert error: Python exception: "{traceback.format_exc()}"')
                 finally:
                     revert_start_time = None
                     revert_in_progress = False
@@ -9594,7 +10689,11 @@ class UltraBotGUI:
                 CHAT_COMMANDS_PAUSED = False
                 print("[Admin] Chat commands resumed")
             else:
-                print(f"[Admin] Unknown command: {cmd}")
+                # Not one of the admin-only commands above -- fall back to the same
+                # general bot-command processor test mode's console uses, so !send,
+                # !type, !click, !combo, !key, etc. all work from this box too.
+                ok, message = run_single_bot_command(cmd)
+                self.root.after(0, lambda m=message: self._log(f"[Admin] {m}"))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -10376,6 +11475,61 @@ class UltraBotGUI:
                  text="Free from console.cloud.google.com -- enable the \"YouTube Data API v3\" and create an API key.",
                  bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 7, "italic")).pack(anchor="w", pady=(4, 0))
 
+        # ── AI Pre-Execution Safety/Copyright Screening (Gemini or Groq) ──
+        gemini_card = ttk.Frame(parent, style="Card.TFrame", padding=20)
+        gemini_card.pack(fill="x", padx=12, pady=(12, 0))
+        tk.Label(gemini_card, text="🛡️  AI Copyright/Safety Screening", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Label(gemini_card,
+                 text="When enabled, checks !sr/!vr requests and typed text (!type/!send/!sendline/"
+                      "!typeenter) for obvious copyright risk BEFORE it plays or displays live, blocking it "
+                      "if flagged. This is a best-effort safety net for obvious cases, not a guarantee -- it "
+                      "fails open (allows the command) on any error, timeout, or missing API key, so a "
+                      "problem with this check can never itself take your commands offline.",
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 8),
+                 wraplength=560, justify="left").pack(anchor="w", pady=(4, 10))
+
+        self._gemini_enabled_var = tk.BooleanVar(value=gemini_config.get("enabled", False))
+        ttk.Checkbutton(gemini_card, text="Enable AI pre-execution screening",
+                        variable=self._gemini_enabled_var,
+                        style="Toggle.TCheckbutton").pack(anchor="w")
+
+        provider_row = tk.Frame(gemini_card, bg=self.BG2)
+        provider_row.pack(anchor="w", pady=(12, 0), fill="x")
+        tk.Label(provider_row, text="Provider:", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._ai_provider_var = tk.StringVar(value=gemini_config.get("provider", "gemini"))
+        ttk.Radiobutton(provider_row, text="Gemini", variable=self._ai_provider_var,
+                        value="gemini").pack(side="left", padx=(0, 16))
+        ttk.Radiobutton(provider_row, text="Groq", variable=self._ai_provider_var,
+                        value="groq").pack(side="left")
+
+        gemini_api_row = tk.Frame(gemini_card, bg=self.BG2)
+        gemini_api_row.pack(anchor="w", pady=(12, 0), fill="x")
+        tk.Label(gemini_api_row, text="Gemini API key:", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left", padx=(0, 8))
+        self._gemini_api_key_var = tk.StringVar(value=gemini_config.get("gemini_api_key", ""))
+        ttk.Entry(gemini_api_row, textvariable=self._gemini_api_key_var, width=40,
+                  show="•", font=("Segoe UI Mono", 9)).pack(side="left")
+        tk.Label(gemini_card,
+                 text="Free from aistudio.google.com -- click \"Get API key\"."
+                      + ("" if gemini_available else "  ⚠ pip install google-genai is required for this to work."),
+                 bg=self.BG2, fg=(self.TEXTDIM if gemini_available else self.RED),
+                 font=("Segoe UI", 7, "italic")).pack(anchor="w", pady=(4, 8))
+
+        groq_api_row = tk.Frame(gemini_card, bg=self.BG2)
+        groq_api_row.pack(anchor="w", pady=(4, 0), fill="x")
+        tk.Label(groq_api_row, text="Groq API key:", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left", padx=(0, 8))
+        self._groq_api_key_var = tk.StringVar(value=gemini_config.get("groq_api_key", ""))
+        ttk.Entry(groq_api_row, textvariable=self._groq_api_key_var, width=40,
+                  show="•", font=("Segoe UI Mono", 9)).pack(side="left")
+        tk.Label(gemini_card,
+                 text="Free from console.groq.com -- click \"API Keys\" → \"Create API Key\"."
+                      + ("" if groq_available else "  ⚠ pip install openai is required for this to work."),
+                 bg=self.BG2, fg=(self.TEXTDIM if groq_available else self.RED),
+                 font=("Segoe UI", 7, "italic")).pack(anchor="w", pady=(4, 0))
+
         btn_row = tk.Frame(parent, bg=self.BG)
         btn_row.pack(fill="x", padx=12, pady=(16, 0))
         ttk.Button(btn_row, text="💾 Save Permissions", style="Green.TButton",
@@ -10389,7 +11543,9 @@ class UltraBotGUI:
 
         # Track unsaved changes (tab index 9)
         self._trace_dirty(9, *self._perm_vars.values(),
-                          self._vote_pct_enabled_var, self._vote_pct_var, self._youtube_api_key_var)
+                          self._vote_pct_enabled_var, self._vote_pct_var, self._youtube_api_key_var,
+                          self._gemini_enabled_var, self._gemini_api_key_var,
+                          self._ai_provider_var, self._groq_api_key_var)
 
     def _save_permissions(self):
         global YOUTUBE_API_KEY
@@ -10406,6 +11562,22 @@ class UltraBotGUI:
             pass
         YOUTUBE_API_KEY = self._youtube_api_key_var.get().strip()
         save_permissions_config()
+
+        global _gemini_client, _groq_client
+        new_gemini_key = self._gemini_api_key_var.get().strip()
+        new_groq_key = self._groq_api_key_var.get().strip()
+        if new_gemini_key != gemini_config.get("gemini_api_key", ""):
+            _gemini_client = None   # force re-init with the new key next time it's used
+        if new_groq_key != gemini_config.get("groq_api_key", ""):
+            _groq_client = None
+        gemini_config["enabled"] = self._gemini_enabled_var.get()
+        gemini_config["provider"] = self._ai_provider_var.get()
+        gemini_config["gemini_api_key"] = new_gemini_key
+        gemini_config["groq_api_key"] = new_groq_key
+        save_gemini_config()
+        save_autostart_everything_config(ai_safety_enabled=gemini_config["enabled"],
+                                          ai_safety_provider=gemini_config["provider"])
+
         self._clear_dirty(9)
         pct_note = (f"vote-by-%:{PERMISSIONS_CONFIG['vote_threshold_percent']}% "
                     if PERMISSIONS_CONFIG['vote_threshold_percent_enabled'] else "vote-by-%:off ")
@@ -11664,6 +12836,7 @@ class UltraBotGUI:
             def toggle_music_enabled():
                 music_config["enabled"] = self.var_music_enabled.get()
                 save_music_config()
+                save_autostart_everything_config(music_playback_enabled=music_config["enabled"])
                 if music_config["enabled"]:
                     start_music_player()
                     self._log("[info] music player enabled.")
@@ -11763,7 +12936,7 @@ class UltraBotGUI:
             self._music_refresh_all_lists()
             self._music_poll_status()
         except Exception as e:
-            self._log(f"[err] music tab build error: {e}")
+            self._log(f'[err] music tab build error: Python exception: "{traceback.format_exc()}"')
 
     def _music_play_selected_schedule(self):
         sel = self.music_schedule_listbox.curselection()
@@ -11922,6 +13095,7 @@ class UltraBotGUI:
             def toggle_video_enabled():
                 video_config["enabled"] = self.var_video_enabled.get()
                 save_video_config()
+                save_autostart_everything_config(video_playback_enabled=video_config["enabled"])
                 if video_config["enabled"]:
                     start_video_player()
                     self._log("[info] video player enabled.")
@@ -12032,7 +13206,7 @@ class UltraBotGUI:
             self._video_refresh_all_lists()
             self._video_poll_status()
         except Exception as e:
-            self._log(f"[err] video tab build error: {e}")
+            self._log(f'[err] video tab build error: Python exception: "{traceback.format_exc()}"')
 
     # ---- the actual movable window the video is rendered into ----
     def ensure_video_window(self):
@@ -12058,7 +13232,7 @@ class UltraBotGUI:
             win.bind("<Configure>", lambda e: self._video_save_geometry_debounced() if e.widget is win else None)
             win.protocol("WM_DELETE_WINDOW", self._on_video_window_close)
         except Exception as e:
-            self._log(f"[err] couldn't open video window: {e}")
+            self._log(f"[err] couldn't open video window: Python exception: \"{traceback.format_exc()}\"")
 
     def set_video_window_title(self, desc):
         try:
@@ -12267,7 +13441,7 @@ class UltraBotGUI:
 
             self._sb_poll_status()
         except Exception as e:
-            self._log(f"[err] soundboard tab build error: {e}")
+            self._log(f'[err] soundboard tab build error: Python exception: "{traceback.format_exc()}"')
 
     def _sb_poll_status(self):
         try:
@@ -12378,7 +13552,7 @@ class UltraBotGUI:
                 procs[port].terminate()
                 self._log(f"[WebDashboard] Stopped spawned instance on port {port}.")
             except Exception as e:
-                self._log(f"[WebDashboard] Couldn't stop port {port}: {e}")
+                self._log(f"[WebDashboard] Couldn't stop port {port}: Python exception: \"{traceback.format_exc()}\"")
             procs.pop(port, None)
         else:
             self._log("[WebDashboard] No tracked spawned instance on that port "
@@ -13016,6 +14190,1053 @@ class UltraBotGUI:
         txt.bind("<MouseWheel>",
                  lambda e: txt.yview_scroll(int(-1 * (e.delta / 120)), "units"))
 
+    # ── Easter eggs ──
+    def _on_title_click(self, event=None):
+        """
+        Counts rapid clicks on the title label. 10 clicks within a few
+        seconds triggers a little celebration overlay. The counter resets
+        if the person pauses for more than 2 seconds between clicks.
+        """
+        self._title_click_count += 1
+
+        if self._title_click_reset_job is not None:
+            try:
+                self.root.after_cancel(self._title_click_reset_job)
+            except Exception:
+                pass
+
+        if self._title_click_count >= 10:
+            self._title_click_count = 0
+            self._trigger_easter_egg("clicks")
+        else:
+            def _reset():
+                self._title_click_count = 0
+            self._title_click_reset_job = self.root.after(2000, _reset)
+
+    def _setup_konami_code_listener(self):
+        """
+        Binds a global key listener for the classic Konami Code
+        (↑ ↑ ↓ ↓ ← → ← → B A). Matching the full sequence triggers the
+        same celebration overlay as the title-click easter egg.
+        """
+        konami_sequence = [
+            "Up", "Up", "Down", "Down",
+            "Left", "Right", "Left", "Right",
+            "b", "a",
+        ]
+        self._konami_progress = []
+
+        def _on_key(event):
+            # Don't track keystrokes while the user is typing in a text
+            # input — avoids both accidental triggers and broken typing
+            # flow if arrow keys happen to be used for cursor movement.
+            widget_class = event.widget.winfo_class() if event.widget else ""
+            if widget_class in ("Entry", "TEntry", "Text", "TCombobox"):
+                return
+
+            key = event.keysym
+            expected = konami_sequence[len(self._konami_progress)]
+            # Letter keys are compared case-insensitively; arrow keys are
+            # compared as-is (Tkinter keysyms are already "Up"/"Down"/etc).
+            match = (key.lower() == expected.lower()) if len(expected) == 1 else (key == expected)
+
+            if match:
+                self._konami_progress.append(key)
+                if len(self._konami_progress) == len(konami_sequence):
+                    self._konami_progress = []
+                    self._trigger_easter_egg("konami")
+            else:
+                # Allow the sequence to restart from this key if it happens
+                # to also be the first key of the sequence.
+                self._konami_progress = [key] if key == konami_sequence[0] else []
+
+        self.root.bind_all("<KeyPress>", _on_key)
+        self._setup_secret_code_listener()
+
+    def _setup_secret_code_listener(self):
+        """
+        Tracks keystrokes anywhere in the GUI for the hidden sequence
+        "SECRET0091" (case-insensitive). Typing it in full reveals a
+        hidden "🎉 Fun" tab next to Reconnect, with a couple of small
+        just-for-fun tools (CPS test, typing speed test). Unlike the
+        Konami listener, this one still tracks keystrokes while an Entry
+        or Text widget has focus, since the whole point is that the user
+        can type it anywhere without needing to click away first.
+        """
+        secret_code = "secret0091"
+        self._secret_code_progress = ""
+
+        def _on_key(event):
+            char = event.char.lower() if event.char else ""
+            if not char or not char.isprintable():
+                return
+
+            expected_next = secret_code[len(self._secret_code_progress)]
+            if char == expected_next:
+                self._secret_code_progress += char
+                if self._secret_code_progress == secret_code:
+                    self._secret_code_progress = ""
+                    self._reveal_fun_tab()
+            else:
+                # Restart the match from this character if it happens to
+                # also be the sequence's first character.
+                self._secret_code_progress = char if char == secret_code[0] else ""
+
+        self.root.bind_all("<KeyPress>", _on_key, add="+")
+
+    def _trigger_easter_egg(self, source):
+        """
+        Plays a short, fun celebration overlay on top of the main window:
+        a burst of colorful confetti pieces falling with physics-like
+        drift, plus a cheeky congratulatory message and a quick chime.
+        Fully driven by root.after() on the main thread — no extra thread
+        needed, and no risk of touching Tkinter widgets off the main thread.
+        """
+        print(f"[EasterEgg] triggered via {source}")
+
+        overlay = tk.Toplevel(self.root)
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        overlay.attributes("-alpha", 0.0)
+        try:
+            overlay.attributes("-transparentcolor", "#010101")
+            overlay.configure(bg="#010101")
+            bg_color = "#010101"
+        except Exception:
+            # -transparentcolor isn't supported on all platforms; fall back
+            # to a solid dark overlay instead of a see-through one.
+            overlay.configure(bg="#0f0f1a")
+            bg_color = "#0f0f1a"
+
+        import random as _random
+        import math as _math
+
+        rw = self.root.winfo_width() or 900
+        rh = self.root.winfo_height() or 650
+        rx = self.root.winfo_x()
+        ry = self.root.winfo_y()
+        overlay.geometry(f"{rw}x{rh}+{rx}+{ry}")
+
+        canvas = tk.Canvas(overlay, width=rw, height=rh, bg=bg_color,
+                            highlightthickness=0, bd=0)
+        canvas.pack(fill="both", expand=True)
+        overlay.attributes("-alpha", 1.0)
+
+        messages = [
+            "🎉 You found a secret!",
+            "✨ Nice one, explorer!",
+            "🎊 Achievement unlocked: Curious Clicker",
+            "🥚 Easter egg found!",
+        ]
+        msg = tk.Label(canvas, text=_random.choice(messages),
+                       bg=bg_color, fg="#f0c060",
+                       font=("Segoe UI", 18, "bold"))
+        msg_window = canvas.create_window(rw // 2, 50, window=msg)
+
+        _play_chime([659.25, 830.61, 987.77, 1318.51], note_duration=0.09, volume=0.22)
+
+        confetti_colors = ["#a684e8", "#3ddc97", "#f0c060", "#ff6b9d", "#4ec5ff"]
+        pieces = []
+        for _ in range(70):
+            x = _random.randint(0, rw)
+            y = _random.randint(-rh, 0)
+            size = _random.uniform(3, 7)
+            color = _random.choice(confetti_colors)
+            item = canvas.create_rectangle(x, y, x + size, y + size,
+                                            fill=color, outline="")
+            pieces.append({
+                "item": item, "x": x, "y": y, "size": size,
+                "vy": _random.uniform(2.5, 5.5),
+                "drift": _random.uniform(-1.5, 1.5),
+                "phase": _random.uniform(0, 6.28),
+            })
+
+        def _animate(frame=0):
+            if frame >= 90 or not overlay.winfo_exists():
+                try:
+                    overlay.destroy()
+                except Exception:
+                    pass
+                return
+            try:
+                for p in pieces:
+                    p["y"] += p["vy"]
+                    p["x"] += p["drift"] + _math.sin(frame * 0.15 + p["phase"]) * 0.8
+                    canvas.coords(p["item"], p["x"], p["y"],
+                                  p["x"] + p["size"], p["y"] + p["size"])
+                    if p["y"] > rh:
+                        p["y"] = _random.randint(-40, -10)
+                        p["x"] = _random.randint(0, rw)
+                # Fade the message out over the last ~20 frames.
+                if frame > 65:
+                    fade = max(0.0, 1.0 - (frame - 65) / 25)
+                    color = self._lerp_color_static(bg_color, "#f0c060", fade)
+                    canvas.itemconfigure(msg_window, state="normal")
+                    msg.configure(fg=color)
+                self.root.after(16, lambda: _animate(frame + 1))
+            except Exception:
+                try:
+                    overlay.destroy()
+                except Exception:
+                    pass
+
+        _animate()
+
+    @staticmethod
+    def _lerp_color_static(c1, c2, t):
+        """Standalone hex color interpolation helper, used by the easter egg overlay."""
+        r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+        r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+        r = int(r1 + (r2 - r1) * t)
+        g = int(g1 + (g2 - g1) * t)
+        b = int(b1 + (b2 - b1) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _reveal_fun_tab(self, celebrate=True):
+        """
+        Inserts a hidden "🎉 Fun" tab right before the Reconnect tab, the
+        first time the secret code is typed. Safe to trigger more than
+        once — does nothing if the tab already exists. Pass
+        celebrate=False when silently re-adding the tab after a theme
+        rebuild, so the confetti/chime only ever plays once per real
+        discovery.
+        """
+        if getattr(self, "_fun_tab_revealed", False):
+            return
+        self._fun_tab_revealed = True
+
+        print("[EasterEgg] secret code entered — revealing Fun tab")
+
+        fun_tab = ttk.Frame(self.nb)
+        try:
+            reconnect_idx = self.nb.index(self._fun_tab_anchor)
+        except Exception:
+            reconnect_idx = "end"
+        self.nb.insert(reconnect_idx, fun_tab, text="🎉 Fun")
+        self._build_fun_tab(fun_tab)
+
+        if celebrate:
+            # Small celebratory flourish so it's obvious something happened,
+            # then jump straight to the new tab.
+            _play_chime([523.25, 659.25, 783.99, 1046.50], note_duration=0.1, volume=0.22)
+            self.nb.select(fun_tab)
+            self._trigger_easter_egg("secret_code")
+
+    def _update_fun_best(self, key, value, higher_is_better=True, extra=None):
+        """Updates fun_high_scores[key] in memory (NOT saved to disk yet -- that only
+        happens when the green Save button is clicked) if value is a new best, and
+        refreshes the live scores display if it exists. extra is an optional dict of
+        additional keys to set alongside (e.g. accuracy alongside wpm) whenever this
+        IS a new best for `key` specifically."""
+        current = fun_high_scores.get(key)
+        is_new_best = current is None or (
+            value > current if higher_is_better else value < current)
+        if is_new_best:
+            fun_high_scores[key] = value
+            if extra:
+                fun_high_scores.update(extra)
+            if hasattr(self, "_fun_scores_label") and self._fun_scores_label.winfo_exists():
+                self._refresh_fun_scores_label()
+        return is_new_best
+
+    def _refresh_fun_scores_label(self):
+        wpm = fun_high_scores.get("wpm") or 0
+        cps = fun_high_scores.get("cps") or 0
+        reaction = fun_high_scores.get("reaction_ms")
+        snake = fun_high_scores.get("snake_score") or 0
+        reaction_str = f"{reaction:.0f}ms" if reaction is not None else "—"
+        self._fun_scores_label.configure(
+            text=f"🏆 Best: {wpm:.0f} WPM  •  {cps:.2f} CPS  •  {reaction_str} reaction  •  {snake} Snake")
+
+    def _build_fun_tab(self, parent):
+        """
+        Builds the Fun tab as its own small notebook of just-for-fun
+        tools: skill tests (typing speed + CPS), a reaction time test, a
+        Snake mini-game, and a random tools panel (dice/coin flip/name
+        picker). Best-ever results across all of these persist to disk,
+        but only when the Save button here is explicitly clicked --
+        nothing auto-saves.
+        """
+        outer = tk.Frame(parent, bg=self.BG)
+        outer.pack(fill="both", expand=True, padx=16, pady=16)
+
+        tk.Label(outer, text="🎉 Just for Fun",
+                 bg=self.BG, fg=self.TEXT,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 12))
+
+        scores_row = tk.Frame(outer, bg=self.BG)
+        scores_row.pack(fill="x", pady=(0, 12))
+        self._fun_scores_label = tk.Label(scores_row, text="", bg=self.BG,
+                                           fg=self.TEXTDIM, font=("Segoe UI", 9))
+        self._fun_scores_label.pack(side="left")
+        self._refresh_fun_scores_label()
+
+        def _save_fun_scores():
+            save_fun_high_scores()
+            save_status.configure(text="✔ Saved!", fg=self.GREEN)
+            self.root.after(2500, lambda: save_status.configure(text=""))
+
+        ttk.Button(scores_row, text="💾 Save High Scores", style="Green.TButton",
+                   command=_save_fun_scores).pack(side="right")
+        save_status = tk.Label(scores_row, text="", bg=self.BG, fg=self.GREEN,
+                                font=("Segoe UI", 9, "bold"))
+        save_status.pack(side="right", padx=(0, 10))
+
+        fun_nb = ttk.Notebook(outer)
+        fun_nb.pack(fill="both", expand=True)
+
+        skills_tab   = ttk.Frame(fun_nb)
+        reaction_tab = ttk.Frame(fun_nb)
+        snake_tab    = ttk.Frame(fun_nb)
+        random_tab   = ttk.Frame(fun_nb)
+
+        fun_nb.add(skills_tab,   text="⌨ Skill Tests")
+        fun_nb.add(reaction_tab, text="🎯 Reaction Time")
+        fun_nb.add(snake_tab,    text="🐍 Snake")
+        fun_nb.add(random_tab,   text="🎲 Random Tools")
+
+        cols = tk.Frame(skills_tab, bg=self.BG)
+        cols.pack(fill="both", expand=True, padx=4, pady=4)
+        self._build_typing_test_panel(cols)
+        self._build_cps_test_panel(cols)
+
+        self._build_reaction_test_panel(reaction_tab)
+        self._build_snake_game_panel(snake_tab)
+        self._build_random_tools_panel(random_tab)
+
+    # ── Typing Speed Test ──
+    def _build_typing_test_panel(self, cols):
+        """
+        Left-hand panel: a duration picker list (like the reference
+        screenshot) plus a live test area that streams a paragraph of
+        random words, coloring each one green (correct), red-strikethrough
+        (wrong), or dim gray (not yet typed) as the user types, with a
+        countdown timer that starts on the first keystroke.
+        """
+        left = tk.Frame(cols, bg=self.BG)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
+
+        # Word pool the test paragraph is randomly generated from.
+        word_pool = (
+            "the be to of and a in that have I it for not on with he as you "
+            "do at this but his by from they we say her she or an will my "
+            "one all would there their what so up out if about who get which "
+            "go me when make can like time no just him know take people into "
+            "year your good some could them see other than then now look "
+            "only come its over think also back after use two how our work "
+            "first well way even new want because any these give day most us "
+            "gained moments fervor eyes success determination influence "
+            "community investors sheer money backgrounds dreamer young armed "
+            "family venture together sought early influence household"
+        ).split()
+
+        durations = [
+            ("Typing Speed Test", 15),   # quick default test
+            ("1 Minute Typing Test", 60),
+            ("2 Minute Typing Test", 120),
+            ("5 Minute Typing Test", 300),
+            ("7 Minute Typing Test", 420),
+            ("10 Minute Typing Test", 600),
+            ("15 Minute Typing Test", 900),
+        ]
+
+        # ── Collapsible duration picker (left column) ──
+        picker_frame = tk.LabelFrame(
+            left, text="  ⌨ Typing Test  ",
+            bg=self.BG2, fg=self.TEXT, font=("Segoe UI", 10, "bold"),
+            labelanchor="n", bd=1, relief="solid")
+        picker_frame.pack(fill="both", expand=True)
+
+        picker_buttons = {}
+
+        def _make_picker_row(label_text, seconds):
+            row = tk.Button(
+                picker_frame, text=f"⌨  {label_text}",
+                bg=self.BG2, fg=self.ACCENT2, activebackground=self.BG3,
+                activeforeground=self.ACCENT2, relief="flat", bd=0,
+                anchor="w", font=("Segoe UI", 9, "bold"), padx=14, pady=8,
+                cursor="hand2",
+                command=lambda: _start_test(seconds),
+            )
+            row.pack(fill="x", padx=6, pady=2)
+            picker_buttons[seconds] = row
+
+        for label_text, seconds in durations:
+            _make_picker_row(label_text, seconds)
+
+        # ── Test area (right side of this panel) ──
+        test_frame = tk.Frame(left, bg=self.BG2)
+        # not packed until a duration is picked — see _start_test
+
+        header_row = tk.Frame(test_frame, bg=self.BG2)
+        header_row.pack(fill="x", padx=14, pady=(12, 6))
+
+        test_title_label = tk.Label(header_row, text="",
+                                     bg=self.BG2, fg=self.TEXT,
+                                     font=("Segoe UI", 12, "bold"))
+        test_title_label.pack(side="left")
+
+        timer_frame = tk.Frame(header_row, bg=self.BG2)
+        timer_frame.pack(side="right")
+        tk.Label(timer_frame, text="🕐 Timer:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+        timer_label = tk.Label(timer_frame, text="0s", bg=self.BG2, fg=self.TEXT,
+                                font=("Segoe UI", 9, "bold"))
+        timer_label.pack(side="left")
+
+        text_display = tk.Text(
+            test_frame, bg=self.BG2, fg=self.TEXTDIM,
+            font=("Consolas", 13), wrap="word", height=8,
+            relief="flat", bd=0, cursor="arrow", padx=14, pady=10,
+            state="disabled", highlightthickness=0)
+        text_display.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+
+        # Tag styles for word coloring.
+        text_display.tag_configure("untyped", foreground=self.TEXTDIM)
+        text_display.tag_configure("current_untyped", foreground=self.TEXT,
+                                    underline=True)
+        text_display.tag_configure("correct", foreground=self.GREEN)
+        text_display.tag_configure("wrong", foreground=self.RED,
+                                    overstrike=True)
+        text_display.tag_configure("cursor", foreground=self.ACCENT2)
+
+        result_label = tk.Label(test_frame, text="",
+                                 bg=self.BG2, fg=self.ACCENT2,
+                                 font=("Segoe UI", 13, "bold"))
+        result_label.pack(pady=(0, 4))
+
+        # Hidden entry that actually captures keystrokes — the visible
+        # Text widget is read-only and only used for rendering. Since the
+        # Text widget (and the frame around it) can still steal focus when
+        # clicked even while disabled, clicking anywhere in the test area
+        # sends focus back to this hidden entry so typing never "goes
+        # nowhere".
+        capture_entry = tk.Entry(test_frame)
+        # Placed off-screen; still receives focus and key events normally.
+        capture_entry.place(x=-500, y=-500, width=1, height=1)
+
+        def _refocus_capture(event=None):
+            if typing_state["running"]:
+                capture_entry.focus_set()
+
+        text_display.bind("<Button-1>", _refocus_capture)
+        test_frame.bind("<Button-1>", _refocus_capture)
+        header_row.bind("<Button-1>", _refocus_capture)
+
+        typing_state = {
+            "words": [], "target_text": "", "duration": 15,
+            "start_time": None, "running": False, "timer_job": None,
+            "current_word_idx": 0,
+        }
+
+        def _generate_paragraph(min_words=60):
+            import random as _random
+            words = [_random.choice(word_pool) for _ in range(min_words)]
+            return words
+
+        def _render_words(typed_text):
+            """
+            Re-renders the whole word list with correct/wrong/untyped
+            coloring. The word currently being typed gets character-level
+            coloring (each typed character shown correct/wrong) plus an
+            underline and a blinking-style cursor bar at the exact typing
+            position, so the user always has a clear "you are here" marker.
+            """
+            text_display.configure(state="normal")
+            text_display.delete("1.0", "end")
+
+            typed_words = typed_text.split(" ")
+            words = typing_state["words"]
+            current_word_pos = len(typed_words) - 1
+
+            for i, word in enumerate(words):
+                if i < current_word_pos:
+                    # A fully committed word (user has moved past it).
+                    tag = "correct" if typed_words[i] == word else "wrong"
+                    text_display.insert("end", word, tag)
+                elif i == current_word_pos:
+                    # The word currently being typed — render character by
+                    # character so correct/wrong letters are visible as you
+                    # type, with a cursor bar right after the last typed
+                    # character.
+                    current_typed = typed_words[i]
+                    overlap = min(len(current_typed), len(word))
+
+                    for ci in range(overlap):
+                        tag = "correct" if current_typed[ci] == word[ci] else "wrong"
+                        text_display.insert("end", word[ci], tag)
+
+                    # Cursor bar sits right where typing currently is.
+                    text_display.insert("end", "\u2502", "cursor")
+
+                    if len(word) > overlap:
+                        # Remaining letters of the word not yet typed.
+                        text_display.insert("end", word[overlap:], "current_untyped")
+                    if len(current_typed) > overlap:
+                        # A typo that overshoots the word's length still
+                        # shows up, marked wrong, after the cursor.
+                        text_display.insert("end", current_typed[overlap:], "wrong")
+                else:
+                    text_display.insert("end", word, "untyped")
+                if i < len(words) - 1:
+                    text_display.insert("end", " ")
+
+            text_display.configure(state="disabled")
+            typing_state["current_word_idx"] = max(0, current_word_pos)
+
+            # Auto-scroll so the current word stays visible as the
+            # paragraph grows (relevant for the longer 10-15 minute tests).
+            text_display.see("end")
+
+        def _timer_tick():
+            if not typing_state["running"]:
+                return
+            elapsed = time.time() - typing_state["start_time"]
+            remaining = typing_state["duration"] - elapsed
+            if remaining <= 0:
+                _finish_test()
+                return
+            timer_label.configure(text=f"{remaining:.0f}s")
+            typing_state["timer_job"] = self.root.after(200, _timer_tick)
+
+        def _finish_test():
+            typing_state["running"] = False
+            if typing_state["timer_job"] is not None:
+                try:
+                    self.root.after_cancel(typing_state["timer_job"])
+                except Exception:
+                    pass
+            timer_label.configure(text="0s")
+
+            typed_text = capture_entry.get()
+            typed_words = typed_text.split(" ")
+            words = typing_state["words"]
+            correct_words = sum(
+                1 for i, w in enumerate(typed_words)
+                if i < len(words) and w == words[i]
+            )
+            elapsed_minutes = typing_state["duration"] / 60
+            wpm = correct_words / max(elapsed_minutes, 1 / 60)
+            accuracy = (correct_words / max(1, len(typed_words))) * 100
+
+            result_label.configure(
+                text=f"🎉 {wpm:.0f} WPM   •   {accuracy:.0f}% accuracy")
+            self._update_fun_best("wpm", wpm, higher_is_better=True, extra={"accuracy": accuracy})
+            capture_entry.configure(state="disabled")
+            _play_chime([523.25, 659.25, 783.99], note_duration=0.1, volume=0.2)
+
+        def _on_typed(event=None):
+            if not typing_state["running"]:
+                return
+
+            if typing_state["start_time"] is None:
+                typing_state["start_time"] = time.time()
+                _timer_tick()
+
+            typed_text = capture_entry.get()
+            _render_words(typed_text)
+
+            # Once every generated word has been passed, extend with more
+            # random words so long tests (10-15 min) never run out.
+            typed_word_count = len(typed_text.split(" "))
+            if typed_word_count >= len(typing_state["words"]) - 5:
+                typing_state["words"].extend(_generate_paragraph(40))
+
+        def _start_test(seconds):
+            picker_frame.pack_forget()
+            test_frame.pack(fill="both", expand=True)
+
+            duration_label = next((d[0] for d in durations if d[1] == seconds),
+                                   "Typing Test")
+            test_title_label.configure(text=duration_label)
+            timer_label.configure(text=f"{seconds}s")
+            result_label.configure(text="")
+
+            typing_state["words"] = _generate_paragraph(80)
+            typing_state["duration"] = seconds
+            typing_state["start_time"] = None
+            typing_state["running"] = True
+
+            capture_entry.configure(state="normal")
+            capture_entry.delete(0, "end")
+            _render_words("")
+            capture_entry.focus_set()
+
+        def _reset_test():
+            if typing_state["timer_job"] is not None:
+                try:
+                    self.root.after_cancel(typing_state["timer_job"])
+                except Exception:
+                    pass
+            test_frame.pack_forget()
+            picker_frame.pack(fill="both", expand=True)
+            typing_state["running"] = False
+
+        capture_entry.bind("<KeyRelease>", _on_typed)
+        capture_entry.bind("<Return>", lambda e: "break")
+
+        back_btn = tk.Button(
+            test_frame, text="↺ Choose another test", bg=self.BG3, fg=self.TEXT,
+            activebackground=self.ACCENT, activeforeground="#fff",
+            relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+            cursor="hand2", command=_reset_test)
+        back_btn.pack(pady=(0, 10))
+
+    # ── CPS Test ──
+    def _build_cps_test_panel(self, cols):
+        """
+        Right-hand panel: a CPS (clicks-per-second) test with a selectable
+        duration. Once the timer runs out, the click button is disabled
+        for 3 seconds to prevent an accidental extra click from starting a
+        new run immediately.
+        """
+        cps_frame = tk.LabelFrame(cols, text="  🖱 CPS Test (Clicks Per Second)  ",
+                                   bg=self.BG2, fg=self.TEXT,
+                                   font=("Segoe UI", 10, "bold"),
+                                   labelanchor="n", bd=1, relief="solid")
+        cps_frame.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        tk.Label(cps_frame, text="Choose a duration, then click as fast as you can.",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9), wraplength=220,
+                 justify="center").pack(pady=(14, 6))
+
+        # ── Duration selector ──
+        duration_var = tk.IntVar(value=5)
+        duration_row = tk.Frame(cps_frame, bg=self.BG2)
+        duration_row.pack(pady=(0, 10))
+
+        cps_duration_options = [1, 3, 5, 10, 30, 60]
+        duration_buttons = {}
+
+        def _select_duration(seconds):
+            duration_var.set(seconds)
+            for s, btn in duration_buttons.items():
+                if s == seconds:
+                    btn.configure(bg=self.ACCENT, fg="#ffffff")
+                else:
+                    btn.configure(bg=self.BG3, fg=self.TEXTDIM)
+
+        for seconds in cps_duration_options:
+            btn = tk.Button(
+                duration_row, text=f"{seconds}s",
+                bg=self.BG3, fg=self.TEXTDIM,
+                activebackground=self.ACCENT, activeforeground="#ffffff",
+                relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+                width=4, cursor="hand2",
+                command=lambda s=seconds: _select_duration(s),
+            )
+            btn.pack(side="left", padx=2)
+            duration_buttons[seconds] = btn
+        _select_duration(5)
+
+        cps_result_label = tk.Label(cps_frame, text="Ready",
+                                     bg=self.BG2, fg=self.ACCENT2,
+                                     font=("Segoe UI", 20, "bold"))
+        cps_result_label.pack(pady=(0, 8))
+
+        cps_state = {"clicks": 0, "running": False, "end_time": 0.0, "locked": False}
+
+        def _cps_tick():
+            if not cps_state["running"]:
+                return
+            remaining = cps_state["end_time"] - time.time()
+            if remaining <= 0:
+                cps_state["running"] = False
+                elapsed = duration_var.get()
+                cps = cps_state["clicks"] / elapsed
+                cps_result_label.configure(
+                    text=f"{cps:.2f} CPS", fg=self.GREEN)
+                self._update_fun_best("cps", cps, higher_is_better=True)
+                _play_chime([523.25, 659.25, 783.99], note_duration=0.1, volume=0.2)
+                _lock_button_briefly()
+                return
+            cps_result_label.configure(
+                text=f"{cps_state['clicks']} clicks — {remaining:0.1f}s left",
+                fg=self.ACCENT2)
+            self.root.after(50, _cps_tick)
+
+        def _lock_button_briefly(seconds=3):
+            """
+            Disables the click button for a few seconds after a test ends,
+            so an accidental extra click right at 0s doesn't immediately
+            start a new run.
+            """
+            cps_state["locked"] = True
+            cps_button.configure(state="disabled")
+
+            def _tick_lock(remaining):
+                if remaining <= 0:
+                    cps_state["locked"] = False
+                    cps_button.configure(
+                        text="Click to start!", state="normal")
+                    for btn in duration_buttons.values():
+                        btn.configure(state="normal")
+                    return
+                cps_button.configure(text=f"Wait {remaining}s...")
+                self.root.after(1000, lambda: _tick_lock(remaining - 1))
+
+            _tick_lock(seconds)
+
+        def _cps_click():
+            if cps_state["locked"]:
+                return
+            if not cps_state["running"]:
+                cps_state["clicks"] = 0
+                cps_state["running"] = True
+                cps_state["end_time"] = time.time() + duration_var.get()
+                cps_button.configure(text="CLICK!")
+                for btn in duration_buttons.values():
+                    btn.configure(state="disabled")
+                _cps_tick()
+            else:
+                cps_state["clicks"] += 1
+
+        cps_button = tk.Button(
+            cps_frame, text="Click to start!",
+            bg=self.ACCENT, fg="#ffffff", activebackground=self.ACCENT2,
+            activeforeground="#ffffff", relief="flat", bd=0,
+            font=("Segoe UI", 11, "bold"), width=18, height=3,
+            cursor="hand2", command=_cps_click,
+        )
+        cps_button.pack(pady=(0, 16))
+
+    # ── Reaction Time Test ──
+    def _build_reaction_test_panel(self, parent):
+        """
+        Classic reaction time test: wait for the box to turn green, then
+        click as fast as possible. Clicking too early (while still red)
+        is called out and the round restarts. Keeps the best time across
+        rounds for the current session.
+        """
+        import random as _random
+
+        wrap = tk.Frame(parent, bg=self.BG)
+        wrap.pack(fill="both", expand=True, padx=20, pady=20)
+
+        tk.Label(wrap, text="Wait for the box to turn green, then click it as fast as you can.",
+                 bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 9)).pack(pady=(0, 14))
+
+        state = {"phase": "idle", "wait_job": None, "start_time": 0.0,
+                 "best_ms": fun_high_scores.get("reaction_ms")}
+
+        box = tk.Label(wrap, text="Click to start", bg=self.BG3, fg=self.TEXT,
+                        font=("Segoe UI", 14, "bold"), width=32, height=8,
+                        cursor="hand2")
+        box.pack(pady=(0, 12))
+
+        _initial_reaction_best = fun_high_scores.get("reaction_ms")
+        _initial_reaction_text = (f"Best: {_initial_reaction_best:.0f} ms"
+                                   if _initial_reaction_best is not None else "Best: —")
+        result_label = tk.Label(wrap, text=_initial_reaction_text, bg=self.BG, fg=self.ACCENT2,
+                                 font=("Segoe UI", 11, "bold"))
+        result_label.pack()
+
+        def _arm_round():
+            state["phase"] = "waiting"
+            box.configure(bg=self.RED, text="Wait for green...")
+            delay_ms = _random.randint(1500, 4000)
+
+            def _go_green():
+                state["phase"] = "ready"
+                state["start_time"] = time.time()
+                box.configure(bg=self.GREEN, text="CLICK NOW!")
+
+            state["wait_job"] = self.root.after(delay_ms, _go_green)
+
+        def _on_box_click(event=None):
+            phase = state["phase"]
+            if phase == "idle":
+                _arm_round()
+            elif phase == "waiting":
+                # Clicked too early — penalize and restart.
+                if state["wait_job"] is not None:
+                    try:
+                        self.root.after_cancel(state["wait_job"])
+                    except Exception:
+                        pass
+                box.configure(bg=self.RED, text="Too soon! Click to try again.")
+                state["phase"] = "idle"
+            elif phase == "ready":
+                elapsed_ms = (time.time() - state["start_time"]) * 1000
+                if state["best_ms"] is None or elapsed_ms < state["best_ms"]:
+                    state["best_ms"] = elapsed_ms
+                    result_label.configure(text=f"Best: {elapsed_ms:.0f} ms 🎉")
+                    self._update_fun_best("reaction_ms", elapsed_ms, higher_is_better=False)
+                else:
+                    result_label.configure(text=f"Best: {state['best_ms']:.0f} ms")
+                box.configure(bg=self.BG3, text=f"{elapsed_ms:.0f} ms — click to try again")
+                state["phase"] = "idle"
+
+        box.bind("<Button-1>", _on_box_click)
+
+    # ── Snake Mini-Game ──
+    def _build_snake_game_panel(self, parent):
+        """
+        A small classic Snake game rendered on a Canvas grid. Arrow keys
+        change direction; the snake grows each time it eats a piece of
+        food, and the game ends on a wall or self collision. Speed
+        increases slightly as the score grows. Purely local — no saving,
+        no networking.
+        """
+        import random as _random
+
+        wrap = tk.Frame(parent, bg=self.BG)
+        wrap.pack(fill="both", expand=True, padx=20, pady=20)
+
+        GRID = 18
+        CELL = 20
+        CANVAS_SIZE = GRID * CELL
+
+        top_row = tk.Frame(wrap, bg=self.BG)
+        top_row.pack(fill="x", pady=(0, 8))
+        score_label = tk.Label(top_row, text="Score: 0", bg=self.BG, fg=self.TEXT,
+                                font=("Segoe UI", 11, "bold"))
+        score_label.pack(side="left")
+        best_label = tk.Label(top_row, text=f"Best: {fun_high_scores.get('snake_score', 0)}", bg=self.BG, fg=self.TEXTDIM,
+                               font=("Segoe UI", 10))
+        best_label.pack(side="right")
+
+        canvas = tk.Canvas(wrap, width=CANVAS_SIZE, height=CANVAS_SIZE,
+                            bg=self.BG2, highlightthickness=1,
+                            highlightbackground=self.BORDER)
+        canvas.pack()
+
+        hint_label = tk.Label(wrap, text="Click the board, then use arrow keys. Space to restart.",
+                               bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 8))
+        hint_label.pack(pady=(6, 0))
+
+        state = {
+            "snake": [(9, 9), (8, 9), (7, 9)],
+            "direction": (1, 0),
+            "next_direction": (1, 0),
+            "food": (12, 9),
+            "score": 0,
+            "best": fun_high_scores.get("snake_score", 0),
+            "running": False,
+            "job": None,
+        }
+
+        def _random_food():
+            while True:
+                pos = (_random.randint(0, GRID - 1), _random.randint(0, GRID - 1))
+                if pos not in state["snake"]:
+                    return pos
+
+        def _draw():
+            canvas.delete("all")
+            for i, (x, y) in enumerate(state["snake"]):
+                color = self.GREEN if i == 0 else self.ACCENT2
+                canvas.create_rectangle(
+                    x * CELL + 1, y * CELL + 1, x * CELL + CELL - 1, y * CELL + CELL - 1,
+                    fill=color, outline="")
+            fx, fy = state["food"]
+            canvas.create_oval(
+                fx * CELL + 3, fy * CELL + 3, fx * CELL + CELL - 3, fy * CELL + CELL - 3,
+                fill="#f0c060", outline="")
+
+        def _game_over():
+            state["running"] = False
+            if state["job"] is not None:
+                try:
+                    self.root.after_cancel(state["job"])
+                except Exception:
+                    pass
+            canvas.create_text(
+                CANVAS_SIZE // 2, CANVAS_SIZE // 2,
+                text="Game Over\nSpace to restart", fill=self.RED,
+                font=("Segoe UI", 13, "bold"), justify="center")
+            _play_chime([392.00, 329.63, 261.63], note_duration=0.12, volume=0.2)
+
+        def _tick():
+            if not state["running"]:
+                return
+            state["direction"] = state["next_direction"]
+            dx, dy = state["direction"]
+            hx, hy = state["snake"][0]
+            new_head = (hx + dx, hy + dy)
+
+            if (not (0 <= new_head[0] < GRID) or not (0 <= new_head[1] < GRID)
+                    or new_head in state["snake"]):
+                _game_over()
+                return
+
+            state["snake"].insert(0, new_head)
+            if new_head == state["food"]:
+                state["score"] += 1
+                score_label.configure(text=f"Score: {state['score']}")
+                state["food"] = _random_food()
+                _play_chime([523.25, 659.25], note_duration=0.06, volume=0.15)
+            else:
+                state["snake"].pop()
+
+            _draw()
+            speed_ms = max(60, 140 - state["score"] * 3)
+            state["job"] = self.root.after(speed_ms, _tick)
+
+        def _start_game():
+            state["snake"] = [(9, 9), (8, 9), (7, 9)]
+            state["direction"] = (1, 0)
+            state["next_direction"] = (1, 0)
+            state["food"] = _random_food()
+            state["score"] = 0
+            score_label.configure(text="Score: 0")
+            state["running"] = True
+            _draw()
+            if state["job"] is not None:
+                try:
+                    self.root.after_cancel(state["job"])
+                except Exception:
+                    pass
+            state["job"] = self.root.after(140, _tick)
+
+        def _on_key(event):
+            dx, dy = state["direction"]
+            key = event.keysym
+            if key == "space" or key == "Return":
+                if state["score"] > state["best"]:
+                    state["best"] = state["score"]
+                    best_label.configure(text=f"Best: {state['best']}")
+                    self._update_fun_best("snake_score", state["score"], higher_is_better=True)
+                _start_game()
+                return
+            new_dir = {
+                "Up": (0, -1), "Down": (0, 1),
+                "Left": (-1, 0), "Right": (1, 0),
+            }.get(key)
+            if new_dir is None:
+                return
+            # Prevent reversing directly into yourself.
+            if (new_dir[0], new_dir[1]) != (-dx, -dy):
+                state["next_direction"] = new_dir
+
+        def _on_canvas_click(event=None):
+            canvas.focus_set()
+            if not state["running"] and state["job"] is None:
+                _start_game()
+
+        canvas.bind("<Button-1>", _on_canvas_click)
+        canvas.bind("<KeyPress>", _on_key)
+        canvas.focus_set()
+
+        _draw()
+        canvas.create_text(
+            CANVAS_SIZE // 2, CANVAS_SIZE // 2,
+            text="Click to start\nArrow keys to move", fill=self.TEXTDIM,
+            font=("Segoe UI", 11, "bold"), justify="center")
+
+    # ── Random Tools (dice, coin flip, name picker) ──
+    def _build_random_tools_panel(self, parent):
+        """
+        A few small randomness-based tools: dice roller, coin flip, and a
+        random name/option picker for deciding between choices — handy for
+        stream giveaways or picking who goes first in something.
+        """
+        import random as _random
+
+        wrap = tk.Frame(parent, bg=self.BG)
+        wrap.pack(fill="both", expand=True, padx=16, pady=16)
+
+        cols = tk.Frame(wrap, bg=self.BG)
+        cols.pack(fill="both", expand=True)
+
+        # ── Dice Roller ──
+        dice_frame = tk.LabelFrame(cols, text="  🎲 Dice Roller  ",
+                                    bg=self.BG2, fg=self.TEXT,
+                                    font=("Segoe UI", 10, "bold"),
+                                    labelanchor="n", bd=1, relief="solid")
+        dice_frame.pack(side="left", fill="both", expand=True, padx=(0, 6))
+
+        dice_result = tk.Label(dice_frame, text="🎲", bg=self.BG2, fg=self.TEXT,
+                                font=("Segoe UI", 36))
+        dice_result.pack(pady=(16, 4))
+
+        dice_sides_var = tk.IntVar(value=6)
+        dice_row = tk.Frame(dice_frame, bg=self.BG2)
+        dice_row.pack(pady=(0, 8))
+        for sides in (4, 6, 8, 10, 12, 20):
+            tk.Radiobutton(
+                dice_row, text=f"d{sides}", variable=dice_sides_var, value=sides,
+                bg=self.BG2, fg=self.TEXTDIM, selectcolor=self.BG3,
+                activebackground=self.BG2, font=("Segoe UI", 8),
+            ).pack(side="left", padx=2)
+
+        def _roll_dice():
+            result = _random.randint(1, dice_sides_var.get())
+            dice_result.configure(text=str(result))
+            _play_chime([440.00, 554.37], note_duration=0.07, volume=0.15)
+
+        tk.Button(dice_frame, text="Roll", bg=self.ACCENT, fg="#ffffff",
+                  activebackground=self.ACCENT2, activeforeground="#ffffff",
+                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                  width=14, cursor="hand2", command=_roll_dice,
+                  ).pack(pady=(0, 16))
+
+        # ── Coin Flip ──
+        coin_frame = tk.LabelFrame(cols, text="  🪙 Coin Flip  ",
+                                    bg=self.BG2, fg=self.TEXT,
+                                    font=("Segoe UI", 10, "bold"),
+                                    labelanchor="n", bd=1, relief="solid")
+        coin_frame.pack(side="left", fill="both", expand=True, padx=(6, 6))
+
+        coin_result = tk.Label(coin_frame, text="🪙", bg=self.BG2, fg=self.TEXT,
+                                font=("Segoe UI", 36))
+        coin_result.pack(pady=(16, 8))
+
+        coin_text_label = tk.Label(coin_frame, text="Flip to decide!",
+                                    bg=self.BG2, fg=self.TEXTDIM,
+                                    font=("Segoe UI", 10))
+        coin_text_label.pack(pady=(0, 8))
+
+        def _flip_coin():
+            outcome = _random.choice(["Heads", "Tails"])
+            coin_text_label.configure(text=outcome, fg=self.GREEN)
+            _play_chime([659.25, 523.25], note_duration=0.08, volume=0.15)
+
+        tk.Button(coin_frame, text="Flip", bg=self.ACCENT, fg="#ffffff",
+                  activebackground=self.ACCENT2, activeforeground="#ffffff",
+                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                  width=14, cursor="hand2", command=_flip_coin,
+                  ).pack(pady=(0, 16))
+
+        # ── Random Picker ──
+        picker_frame = tk.LabelFrame(cols, text="  🎯 Random Picker  ",
+                                      bg=self.BG2, fg=self.TEXT,
+                                      font=("Segoe UI", 10, "bold"),
+                                      labelanchor="n", bd=1, relief="solid")
+        picker_frame.pack(side="left", fill="both", expand=True, padx=(6, 0))
+
+        tk.Label(picker_frame, text="One name/option per line:",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).pack(pady=(12, 4))
+
+        picker_text = tk.Text(picker_frame, bg=self.BG3, fg=self.TEXT,
+                               font=("Segoe UI", 9), height=5, width=24,
+                               insertbackground=self.TEXT, relief="flat", bd=0)
+        picker_text.pack(padx=10, pady=(0, 8))
+
+        picker_result = tk.Label(picker_frame, text="",
+                                  bg=self.BG2, fg=self.GREEN,
+                                  font=("Segoe UI", 12, "bold"),
+                                  wraplength=200)
+        picker_result.pack(pady=(0, 4))
+
+        def _pick_random():
+            options = [line.strip() for line in picker_text.get("1.0", "end").split("\n")
+                       if line.strip()]
+            if not options:
+                picker_result.configure(text="Add some options first!", fg=self.RED)
+                return
+            winner = _random.choice(options)
+            picker_result.configure(text=f"🎉 {winner}", fg=self.GREEN)
+            _play_chime([523.25, 659.25, 783.99], note_duration=0.09, volume=0.2)
+
+        tk.Button(picker_frame, text="Pick Random", bg=self.ACCENT, fg="#ffffff",
+                  activebackground=self.ACCENT2, activeforeground="#ffffff",
+                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                  width=16, cursor="hand2", command=_pick_random,
+                  ).pack(pady=(0, 16))
+
 
 # ========================= MAIN =========================
 if __name__ == '__main__':
@@ -13074,7 +15295,7 @@ if __name__ == '__main__':
                 else:
                     print("[AutoStart] video_id.json had no video_id -- start the bot manually.")
             except Exception as e:
-                print(f"[AutoStart] Could not self-start from video_id.json: {e}")
+                print(f'[AutoStart] Could not self-start from video_id.json: Python exception: "{traceback.format_exc()}"')
             if REALPC_CONFIG.get("enabled"):
                 print("[AutoStart] NOTE: Real PC Control was enabled before this restart. "
                       "For safety it does NOT auto-resume -- go to the Real PC Control "
