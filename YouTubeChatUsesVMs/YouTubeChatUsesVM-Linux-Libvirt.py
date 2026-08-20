@@ -2,8 +2,11 @@ import subprocess
 import time
 import traceback
 import signal as _signal_module
-import threading as _threading_module
+import threading
 import tkinter as tk
+
+# Keep the module available under the existing alias used elsewhere in this file as well.
+_threading_module = threading
 import tkinter.font as tkfont
 import os
 import sys
@@ -131,7 +134,7 @@ if platform.system() == "Windows" and not _is_admin():
     MB_ICONQUESTION = 0x20
     IDYES           = 6
     msg = (
-        "VMware Chat Bot requires Administrator privileges.\n\n"
+        "Libvirt Chat Bot requires Administrator privileges.\n\n"
         "Reason: Without admin rights, the bot cannot write the\n"
         "overlay HTML files (vote status, OS vote, etc.).\n\n"
         "Click Yes to continue, No to exit."
@@ -333,7 +336,7 @@ def _check_for_update():
 # Browsable page: https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-Libvirt.py
 AUTOUPDATE_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
 AUTOUPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Linux-Libvirt.py"
-AUTOUPDATE_POLL_INTERVAL = 1  # seconds -- checked with a conditional GET (ETag), so most
+AUTOUPDATE_POLL_INTERVAL = 5  # seconds -- checked with a conditional GET (ETag), so most
                               # checks are cheap "304 Not Modified" responses, not full downloads.
 
 _autoupdate_relaunch_triggered = False   # guards against triggering the pipeline twice
@@ -673,20 +676,59 @@ echo Update complete.
         print(f'[AutoUpdate] Could not write batch file: Python exception: "{traceback.format_exc()}"')
         return None
 
-def _save_all_configs_before_relaunch():
-    """Flushes every persisted-config category to disk before the old process gets
-    killed. Without this, only whatever the user had already explicitly clicked
-    "Save" on (each tab has its own save_*_config() call, not auto-saved on every
-    change) would survive a relaunch -- anything changed but not yet saved on a tab
-    the user hadn't clicked Save on would silently vanish the moment the old process
-    was killed (os._exit() + pkill -9 give zero opportunity for cleanup code to run).
-    Each save is independently wrapped so one failing doesn't block the rest."""
+_config_autosave_stop = threading.Event()
+_config_autosave_thread = None
+_config_autosave_last_snapshot = None
+
+
+def _config_autosave_snapshot():
+    """Return a JSON-serializable snapshot of the config state; the autosave loop
+    only writes when this snapshot changes, so the requested 0.1s persistence
+    stays active without spamming the console on identical state."""
+    snapshot = {}
+    for key in [
+        "FLASK_CONFIG", "REALPC_CONFIG", "PERMISSIONS_CONFIG", "SOUND_CONFIG",
+        "MULTI_STREAM_CONFIG", "SCHEDULER_CONFIG", "VNC_CONFIG", "OBS_CONFIG",
+        "AUTO_START_CONFIG", "gemini_config", "RECONNECT_CONFIG", "OS_VOTING_CONFIG",
+        "music_config", "video_config", "soundboard_config", "INTERNET_CONFIG",
+        "MRTRISTINAI_CONFIG", "YT_LOG_RELAY_CONFIG", "custom_commands",
+    ]:
+        if key in globals():
+            snapshot[key] = globals()[key]
+    try:
+        snapshot["appearance"] = {
+            name: getattr(UltraBotGUI, name)
+            for name in ["BG", "BG2", "BG3", "ACCENT", "ACCENT2", "TEXT", "TEXTDIM", "CONSOLE", "BORDER"]
+            if hasattr(UltraBotGUI, name)
+        }
+        snapshot["appearance_font_size"] = getattr(UltraBotGUI, "_FONT_SIZE", None)
+    except Exception:
+        pass
+    try:
+        snapshot["autostart_everything"] = {
+            "backend": current_vm_backend,
+            "vm": VMX_PATH,
+            "os_voting_vm": current_os_vm if OS_VOTING_ENABLED and current_os_vm else None,
+            "os_voting_backend": current_vm_backend if OS_VOTING_ENABLED and current_os_vm else None,
+            "ai_safety_enabled": gemini_config.get("enabled"),
+            "ai_safety_provider": gemini_config.get("provider"),
+            "music_playback_enabled": music_config.get("enabled"),
+            "video_playback_enabled": video_config.get("enabled"),
+        }
+    except Exception:
+        pass
+    return json.dumps(snapshot, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _all_json_savers():
+    """Return the set of saver functions that persist the app's JSON config files."""
     savers = [
         save_flask_config, save_realpc_config, save_permissions_config,
         save_sound_config, save_multi_stream_config, save_scheduler_config,
         save_vnc_config, save_obs_config, save_auto_start_config, save_gemini_config,
         save_reconnect_config, save_os_voting_config, save_music_config,
         save_video_config, save_soundboard_config, save_internet_config,
+        save_mrtristinai_config, save_custom_commands,
         lambda: save_autostart_everything_config(
             backend=current_vm_backend, vm=VMX_PATH,
             os_voting_vm=(current_os_vm if OS_VOTING_ENABLED and current_os_vm else None),
@@ -696,21 +738,63 @@ def _save_all_configs_before_relaunch():
             music_playback_enabled=music_config.get("enabled"),
             video_playback_enabled=video_config.get("enabled")),
     ]
-    for saver in savers:
-        try:
-            saver()
-        except Exception as e:
-            print(f'[AutoUpdate] Could not save {saver.__name__} before relaunch: Python exception: "{traceback.format_exc()}"')
-    # save_appearance_config() is the one outlier that takes arguments instead of
-    # reading straight from a module-level dict -- same colors/font_size construction
-    # _save_appearance() (the GUI's own Save button handler) uses.
     try:
         colors = {key: getattr(UltraBotGUI, key)
                   for key in ["BG", "BG2", "BG3", "ACCENT", "ACCENT2",
                               "TEXT", "TEXTDIM", "CONSOLE", "BORDER"]}
-        save_appearance_config(colors, UltraBotGUI._FONT_SIZE)
-    except Exception as e:
-        print(f'[AutoUpdate] Could not save appearance config before relaunch: Python exception: "{traceback.format_exc()}"')
+        savers.append(lambda: save_appearance_config(colors, UltraBotGUI._FONT_SIZE))
+    except Exception:
+        pass
+    return savers
+
+
+def start_config_autosave(interval_seconds: float = 0.1):
+    """Background thread that writes the JSON-backed config files every ~0.1s only
+    when the persisted state actually changes, so the app keeps fresh saves without
+    spamming identical writes on every tick."""
+    global _config_autosave_thread, _config_autosave_last_snapshot
+    _config_autosave_stop.clear()
+    if _config_autosave_thread is not None and _config_autosave_thread.is_alive():
+        return
+    _config_autosave_last_snapshot = None
+
+    def _loop():
+        while not _config_autosave_stop.wait(interval_seconds):
+            try:
+                snapshot = _config_autosave_snapshot()
+                if snapshot == _config_autosave_last_snapshot:
+                    continue
+                _config_autosave_last_snapshot = snapshot
+                for saver in _all_json_savers():
+                    try:
+                        saver()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    _config_autosave_thread = threading.Thread(target=_loop, daemon=True, name="json_autosave")
+    _config_autosave_thread.start()
+
+
+def stop_config_autosave():
+    _config_autosave_stop.set()
+
+
+def _save_all_configs_before_relaunch():
+    """Flushes every persisted-config category to disk before the old process gets
+    killed. Without this, only whatever the user had already explicitly clicked
+    "Save" on (each tab has its own save_*_config() call, not auto-saved on every
+    change) would survive a relaunch -- anything changed but not yet saved on a tab
+    the user hadn't clicked Save on would silently vanish the moment the old process
+    was killed (os._exit() + pkill -9 give zero opportunity for cleanup code to run).
+    Each save is independently wrapped so one failing doesn't block the rest."""
+    for saver in _all_json_savers():
+        try:
+            saver()
+        except Exception as e:
+            print(f'[AutoUpdate] Could not save a config before relaunch: Python exception: "{traceback.format_exc()}"')
+
 
 def trigger_relaunch_pipeline(reason, version_data=None, source_path=None):
     """Shared by both the version-update watcher and the file-edit watchdog below.
@@ -863,10 +947,12 @@ def _ver_tuple_v2(v):
         return (0, 0, 0)
 
 def _autoupdate_watcher():
-    """Runs the whole time the bot is open. Checks AUTOUPDATE_VERSION_URL once a
-    second using a conditional GET (If-None-Match/ETag) so repeated checks are cheap
-    304 responses -- logs nothing on a normal check, only when a new version is
-    actually found or on a real (non-network-hiccup) error."""
+    """Runs the whole time the bot is open. Checks AUTOUPDATE_VERSION_URL every
+    AUTOUPDATE_POLL_INTERVAL seconds (5) using a conditional GET (If-None-Match/ETag)
+    so repeated checks are cheap 304 responses -- logs nothing on a normal check, only
+    when a new version is actually found or on a real (non-network-hiccup) error.
+    On detecting a new version: the new script is downloaded and signature-verified,
+    written to disk, and the bot restarts itself via the relaunch pipeline."""
     import urllib.request
     import urllib.error
     last_etag = None
@@ -898,11 +984,11 @@ def _autoupdate_watcher():
                 consecutive_errors = 0   # not modified -- totally normal, stay silent
             else:
                 consecutive_errors += 1
-                if consecutive_errors in (1, 300) or consecutive_errors % 1800 == 0:
+                if consecutive_errors in (1, 60) or consecutive_errors % 360 == 0:   # ~first failure, ~5 min, then every ~30 min at the 5s interval
                     print(f"[AutoUpdate] Version check failed (HTTP {e.code}). Will keep retrying quietly.")
         except Exception:
             consecutive_errors += 1
-            if consecutive_errors in (1, 300) or consecutive_errors % 1800 == 0:
+            if consecutive_errors in (1, 60) or consecutive_errors % 360 == 0:   # ~first failure, ~5 min, then every ~30 min at the 5s interval
                 print("[AutoUpdate] Version check failed (network). Will keep retrying quietly.")
 
 def _discover_autostart_generations(folder, base_name):
@@ -1034,13 +1120,13 @@ def _create_splash():
     inner = tk.Frame(border, bg="#0f0f1a")
     inner.pack(fill="both", expand=True)
 
-    # "Script by Nexovative"
-    tk.Label(inner, text="Script by Nexovative",
+    # "Script by MrTristin, Nexovative, and ReallyIron"
+    tk.Label(inner, text="Script by MrTristin, Nexovative, and ReallyIron",
              bg="#0f0f1a", fg="#f0c060",
              font=("Segoe UI", 11, "bold")).pack(pady=(22, 0))
 
     # App title
-    tk.Label(inner, text="VMware Chat Bot",
+    tk.Label(inner, text="Libvirt Chat Bot",
              bg="#0f0f1a", fg="#ffffff",
              font=("Segoe UI", 18, "bold")).pack(pady=(4, 0))
 
@@ -1281,7 +1367,7 @@ def notify(title, message, timeout=4):
                 _plyer_notification.notify(
                     title=title,
                     message=message,
-                    app_name="VMware Chat Bot",
+                    app_name="Libvirt Chat Bot",
                     timeout=timeout,
                 )
             except Exception as e:
@@ -1332,7 +1418,7 @@ def start_tray_icon():
     _tray_icon = pystray.Icon(
         name  = "VBoxChatBot",
         icon  = _make_tray_image(),
-        title = "VMware Chat Bot",
+        title = "Libvirt Chat Bot",
         menu  = menu,
     )
     if platform.system() in ("Darwin", "Linux"):
@@ -3233,6 +3319,132 @@ SUCCESS_SOUND_FILE = "success.mp3"
 ADMIN_USERNAME     = "Nexora-WN"
 YOUTUBE_API_KEY    = ""   # Optional: paste your YouTube Data API v3 key here for live stats
 
+BLOCKED_MEDIA_FILE = "blocked_media.json"
+BLOCKED_MEDIA = {"videos": [], "audio": []}
+
+
+def _blocked_media_key(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    text = text.replace(" ", "")
+    return text.lower()
+
+
+def load_blocked_media():
+    global BLOCKED_MEDIA
+    default = {"videos": [], "audio": []}
+    try:
+        if not os.path.exists(BLOCKED_MEDIA_FILE):
+            BLOCKED_MEDIA = default
+            return BLOCKED_MEDIA
+        with open(BLOCKED_MEDIA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            BLOCKED_MEDIA = default
+            return BLOCKED_MEDIA
+        videos = data.get("videos", [])
+        audio = data.get("audio", [])
+        BLOCKED_MEDIA = {
+            "videos": [
+                {"value": item.get("value") if isinstance(item, dict) else item, "reason": item.get("reason", "") if isinstance(item, dict) else ""}
+                for item in videos
+            ],
+            "audio": [
+                {"value": item.get("value") if isinstance(item, dict) else item, "reason": item.get("reason", "") if isinstance(item, dict) else ""}
+                for item in audio
+            ],
+        }
+    except Exception:
+        BLOCKED_MEDIA = default
+        console_log("ERROR", f'[blocked media] failed to load {BLOCKED_MEDIA_FILE}: Python exception: "{traceback.format_exc()}"')
+    return BLOCKED_MEDIA
+
+
+def save_blocked_media():
+    try:
+        with open(BLOCKED_MEDIA_FILE, "w", encoding="utf-8") as f:
+            json.dump(BLOCKED_MEDIA, f, indent=2)
+    except Exception:
+        console_log("ERROR", f'[blocked media] failed to save {BLOCKED_MEDIA_FILE}: Python exception: "{traceback.format_exc()}"')
+
+
+def media_is_blocked(kind: str, value):
+    if kind not in {"video", "audio"}:
+        return False
+    key = _blocked_media_key(value)
+    if not key:
+        return False
+    bucket = BLOCKED_MEDIA.get("videos" if kind == "video" else "audio", [])
+    for item in bucket:
+        if isinstance(item, dict):
+            candidate = item.get("value") or item.get("id") or item.get("url") or item.get("name")
+        else:
+            candidate = item
+        if _blocked_media_key(candidate) == key:
+            return True
+    return False
+
+
+def block_media(kind: str, value, reason: str = "manual"):
+    if kind not in {"video", "audio"}:
+        return False
+    key = _blocked_media_key(value)
+    if not key:
+        return False
+    bucket = BLOCKED_MEDIA.setdefault("videos" if kind == "video" else "audio", [])
+    if any(_blocked_media_key((item.get("value") if isinstance(item, dict) else item)) == key for item in bucket):
+        return False
+    bucket.append({"value": str(value).strip(), "reason": str(reason or "manual")})
+    save_blocked_media()
+    return True
+
+
+def _live_link_detected(value):
+    text = (value or "").strip()
+    if not text:
+        return False
+    low = text.lower()
+    return (
+        "/live/" in low
+        or "youtube.com/live" in low
+        or "youtu.be/live" in low
+        or "live=1" in low
+        or "&live=1" in low
+        or "?live=1" in low
+    )
+
+
+def auto_block_live_link(value, kind: str | None = None, reason: str = "live link auto-blocked"):
+    text = (value or "").strip()
+    if not text or not _live_link_detected(text):
+        return False
+    target_kind = kind or ("video" if "youtube.com/watch" in text.lower() or "youtu.be/" in text.lower() or "watch?v=" in text.lower() else "audio")
+    if target_kind not in {"video", "audio"}:
+        return False
+    if media_is_blocked(target_kind, text):
+        return False
+    block_media(target_kind, text, reason)
+    return True
+
+
+def _enforce_blocked_media(kind: str, value, *, source_label: str = "media"):
+    text = (value or "").strip()
+    if not text:
+        return False
+    if media_is_blocked(kind, text):
+        console_log("WARN", f"[{source_label}] {kind.title()} link is blocked: {text}")
+        notify(f"{kind.title()} Blocked", f"This {kind.lower()} link is on the blocked list.", timeout=6)
+        return True
+    if auto_block_live_link(text, kind=kind, reason=f"live {kind} link auto-blocked"):
+        console_log("WARN", f"[{source_label}] Auto-blocked live {kind} link: {text}")
+        notify(f"{kind.title()} Blocked", f"Live {kind} link auto-blocked and saved.", timeout=6)
+        return True
+    return False
+
+
 # Global bot state (set at runtime from GUI)
 VIDEO_ID = ""
 VMX_PATH  = ""
@@ -3258,6 +3470,7 @@ REALPC_CONFIG = {
     "mouse_step":        50,       # pixels per !moverel step
     "scroll_step":       3,        # clicks per !scroll
     "max_type_length":   100,      # max chars per !type command
+    "startup_confirmed": False,    # first-run safety warnings only; auto relaunches skip them
 }
 
 _realpc_bot_thread   = None
@@ -3265,15 +3478,18 @@ _realpc_stop_event   = threading.Event()
 _realpc_user_cd      = {}          # {username: last_action_time}
 _realpc_cd_lock      = threading.Lock()
 _realpc_status_cb    = None        # GUI callback to update status label
+_realpc_reconnect_failures = 0
 
 
 def load_realpc_config():
     global REALPC_CONFIG
     try:
+        REALPC_CONFIG.setdefault("startup_confirmed", False)
         if os.path.exists(REALPC_CONFIG_FILE):
             with open(REALPC_CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             REALPC_CONFIG.update(data)
+            REALPC_CONFIG.setdefault("startup_confirmed", False)
             print("[RealPC] Config loaded.")
     except Exception as e:
         print(f'[RealPC] Load error: Python exception: "{traceback.format_exc()}"')
@@ -3503,8 +3719,19 @@ def _parse_two_ints(s: str):
     return None
 
 
+def _realpc_backoff_delay(failures: int) -> float:
+    if failures <= 0:
+        return 0.0
+    base = RECONNECT_CONFIG.get("base_delay", 5)
+    cap = RECONNECT_CONFIG.get("max_delay", 120)
+    return min(base * (2 ** (failures - 1)), cap)
+
+
 def _realpc_bot_loop():
-    """Background thread: connects to YouTube chat and processes !command style messages."""
+    """Background thread: connects to YouTube chat and processes !command style messages,
+    reconnecting automatically when the stream drops instead of dying permanently."""
+    global _realpc_reconnect_failures
+
     vid = REALPC_CONFIG.get("video_id", "").strip()
     if not vid:
         _realpc_set_status("No Video ID configured.")
@@ -3520,91 +3747,117 @@ def _realpc_bot_loop():
     pyautogui.FAILSAFE = REALPC_CONFIG.get("failsafe", True)
     pyautogui.PAUSE    = REALPC_CONFIG.get("action_delay", 0.05)
 
-    _realpc_set_status(f"Connecting to stream: {vid}")
     chat = None
-    try:
-        chat = pytchat.create(video_id=vid)
-    except Exception as e:
-        _realpc_set_status(f"Connection failed: {e}")
-        return
-
-    _realpc_set_status("Listening — commands: !type  !send  !combo  !click  !move  etc.")
-
+    reconnect_attempt = 0
     while not _realpc_stop_event.is_set():
-        if not chat.is_alive():
-            _realpc_set_status("Chat ended or disconnected.")
-            break
         try:
-            for msg_obj in chat.get().sync_items():
-                if _realpc_stop_event.is_set():
+            if reconnect_attempt > 0:
+                backoff = _realpc_backoff_delay(reconnect_attempt)
+                if backoff > 0:
+                    _realpc_set_status(f"Disconnected — reconnecting in {backoff:.0f}s (attempt {reconnect_attempt})")
+                    if _realpc_stop_event.wait(backoff):
+                        break
+
+            _realpc_set_status(f"Connecting to stream: {vid}" if reconnect_attempt == 0 else f"Reconnecting to stream: {vid} (attempt {reconnect_attempt})")
+            chat = pytchat.create(video_id=vid)
+            reconnect_attempt = 0
+            _realpc_reconnect_failures = 0
+            _realpc_set_status("Listening — commands: !type  !send  !combo  !click  !move  etc.")
+
+            while not _realpc_stop_event.is_set():
+                if not chat or not chat.is_alive():
+                    _realpc_set_status("Chat ended or disconnected.")
                     break
-
-                user = normalize_username(msg_obj.author.name)
-                msg  = msg_obj.message.strip()
-
-                if not msg or not msg.startswith("!"):
-                    continue
-                if user in blocked:
-                    continue
-                if wl_only and user not in whitelist:
-                    continue
-                if not _realpc_check_cooldown(user):
-                    continue
-
-                # Chain parse: split on "!" boundaries to support
-                # "!combo win+r !wait 1 !send cmd" style messages
-                # Split on every "!" that follows a space (or is at start)
-                import re as _re
-                raw_chain = msg.strip()
-                # Split at every "!" that starts a new token
-                # e.g. "!combo win+r !wait 1 !send cmd"
-                # → ["combo win+r", "wait 1", "send cmd"]
-                segments = [s.strip() for s in _re.split(r'\s+(?=!)', raw_chain)]
-                # Each segment starts with "!" — strip it
-                commands = []
-                for seg in segments:
-                    if seg.startswith("!"):
-                        seg = seg[1:].strip()
-                    if not seg:
-                        continue
-                    parts  = seg.split(maxsplit=1)
-                    action = parts[0].lower()
-                    args   = parts[1] if len(parts) > 1 else ""
-                    commands.append((action, args))
-
-                if not commands:
-                    continue
-
-                chain_str = "  →  ".join(
-                    f"!{a} {g}".strip() for a, g in commands)
-                _append_event("REALPC_MSG", user, chain_str)
-
-                def _run_chain(cmds=commands, u=user):
-                    for action, args in cmds:
+                try:
+                    for msg_obj in chat.get().sync_items():
                         if _realpc_stop_event.is_set():
                             break
-                        _realpc_execute(u, action, args)
 
-                threading.Thread(target=_run_chain, daemon=True).start()
+                        user = normalize_username(msg_obj.author.name)
+                        msg  = msg_obj.message.strip()
+
+                        if not msg or not msg.startswith("!"):
+                            continue
+                        if user in blocked:
+                            continue
+                        if wl_only and user not in whitelist:
+                            continue
+                        if not _realpc_check_cooldown(user):
+                            continue
+
+                        import re as _re
+                        raw_chain = msg.strip()
+                        segments = [s.strip() for s in _re.split(r'\s+(?=!)', raw_chain)]
+                        commands = []
+                        for seg in segments:
+                            if seg.startswith("!"):
+                                seg = seg[1:].strip()
+                            if not seg:
+                                continue
+                            parts  = seg.split(maxsplit=1)
+                            action = parts[0].lower()
+                            args   = parts[1] if len(parts) > 1 else ""
+                            commands.append((action, args))
+
+                        if not commands:
+                            continue
+
+                        chain_str = "  →  ".join(
+                            f"!{a} {g}".strip() for a, g in commands)
+                        _append_event("REALPC_MSG", user, chain_str)
+
+                        def _run_chain(cmds=commands, u=user):
+                            for action, args in cmds:
+                                if _realpc_stop_event.is_set():
+                                    break
+                                _realpc_execute(u, action, args)
+
+                        threading.Thread(target=_run_chain, daemon=True).start()
+
+                except Exception:
+                    if not _realpc_stop_event.is_set():
+                        print(f'[RealPC] Loop error: Python exception: "{traceback.format_exc()}"')
+                        break
+
+                if _realpc_stop_event.wait(0.05):
+                    break
+
+            if chat is not None:
+                try:
+                    chat.terminate()
+                except Exception:
+                    pass
+                chat = None
+
+            if _realpc_stop_event.is_set():
+                break
+
+            reconnect_attempt += 1
+            _realpc_reconnect_failures = reconnect_attempt
+            continue
 
         except Exception as e:
-            if not _realpc_stop_event.is_set():
-                print(f'[RealPC] Loop error: Python exception: "{traceback.format_exc()}"')
+            if _realpc_stop_event.is_set():
+                break
+            reconnect_attempt += 1
+            _realpc_reconnect_failures = reconnect_attempt
+            _realpc_set_status(f"Connection failed: {e} — retrying in {_realpc_backoff_delay(reconnect_attempt):.0f}s")
+            if _realpc_stop_event.wait(_realpc_backoff_delay(reconnect_attempt)):
+                break
 
-        if _realpc_stop_event.wait(0.05):
-            break
-
-    if chat:
+    if chat is not None:
         try: chat.terminate()
         except Exception: pass
+    _realpc_reconnect_failures = 0
     _realpc_set_status("Stopped.")
 
 
 def start_realpc_bot():
-    global _realpc_bot_thread
+    global _realpc_bot_thread, _realpc_reconnect_failures
     if _realpc_bot_thread and _realpc_bot_thread.is_alive():
         return False
     _realpc_stop_event.clear()
+    _realpc_reconnect_failures = 0
     _realpc_bot_thread = threading.Thread(
         target=_realpc_bot_loop, daemon=True, name="realpc_bot"
     )
@@ -3614,6 +3867,8 @@ def start_realpc_bot():
 
 def stop_realpc_bot():
     _realpc_stop_event.set()
+    global _realpc_reconnect_failures
+    _realpc_reconnect_failures = 0
 
 # ========================= EVENT LOG =========================
 EVENT_LOG_FILE = "event_log.json"
@@ -3707,6 +3962,235 @@ def save_permissions_config():
     except Exception as e:
         print(f'[Permissions] Save error: Python exception: "{traceback.format_exc()}"')
 
+# ========================= YT CHAT LOG RELAY =========================
+# Mirrors every line that shows up in this app's own console/log box out to the
+# YouTube Live Chat itself. This uses a real OAuth "send message" call (the
+# same flow used by liveChat.messages.insert) -- authenticated as YOUR OWN
+# Google account. This is separate from the read-only YOUTUBE_API_KEY above:
+# an API key alone can read stats but cannot send chat messages.
+YT_LOG_RELAY_CONFIG_FILE = "yt_log_relay_config.json"
+YT_LOG_RELAY_CONFIG = {
+    "enabled":       False,   # master on/off switch for mirroring console lines to YT chat
+    "client_id":     "",      # OAuth client ID (Google Cloud Console -> OAuth client)
+    "client_secret": "",      # OAuth client secret
+    "auth_code":     "",      # one-time authorization code -- consumed once, then cleared
+    "access_token":  "",      # short-lived bearer token (auto-refreshed on expiry)
+    "refresh_token": "",      # long-lived token used to mint new access tokens
+    "live_chat_id":  "",      # target liveChatId messages get posted into
+}
+
+import queue as _yt_relay_queue_module
+_yt_relay_queue = _yt_relay_queue_module.Queue()
+_yt_relay_thread = None
+_yt_relay_stop_event = threading.Event()
+
+def load_yt_log_relay_config():
+    global YT_LOG_RELAY_CONFIG
+    try:
+        if os.path.exists(YT_LOG_RELAY_CONFIG_FILE):
+            with open(YT_LOG_RELAY_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            YT_LOG_RELAY_CONFIG.update(data)
+            print("[YTLogRelay] Config loaded.")
+    except Exception:
+        print(f'[YTLogRelay] Load error: Python exception: "{traceback.format_exc()}"')
+
+def save_yt_log_relay_config():
+    try:
+        with open(YT_LOG_RELAY_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(YT_LOG_RELAY_CONFIG, f, indent=2)
+        print("[YTLogRelay] Config saved.")
+    except Exception:
+        print(f'[YTLogRelay] Save error: Python exception: "{traceback.format_exc()}"')
+
+def yt_relay_exchange_auth_code():
+    """
+    One-time exchange: turns a fresh OAuth 'auth_code' (from the Google consent
+    screen) into an access_token + refresh_token pair. Requires client_id and
+    client_secret to already be filled in on the panel.
+    """
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+    import json as _json
+
+    cid = YT_LOG_RELAY_CONFIG.get("client_id", "").strip()
+    csec = YT_LOG_RELAY_CONFIG.get("client_secret", "").strip()
+    code = YT_LOG_RELAY_CONFIG.get("auth_code", "").strip()
+    if not (cid and csec and code):
+        print("[YTLogRelay] Need Client ID, Client Secret, and Auth Code to exchange.")
+        return False
+
+    payload = urllib.parse.urlencode({
+        "code": code,
+        "client_id": cid,
+        "client_secret": csec,
+        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+        "grant_type": "authorization_code",
+    }).encode()
+    try:
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=payload)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read().decode())
+        YT_LOG_RELAY_CONFIG["access_token"] = data.get("access_token", "")
+        if data.get("refresh_token"):
+            YT_LOG_RELAY_CONFIG["refresh_token"] = data.get("refresh_token")
+        YT_LOG_RELAY_CONFIG["auth_code"] = ""   # single-use -- clear it once consumed
+        save_yt_log_relay_config()
+        print("[YTLogRelay] Auth code exchanged for tokens.")
+        return True
+    except Exception as e:
+        print(f"[YTLogRelay] Auth code exchange failed: {e}")
+        return False
+
+def yt_relay_refresh_access_token():
+    """Uses the stored refresh_token to mint a new access_token."""
+    import urllib.request
+    import urllib.parse
+    import json as _json
+
+    cid = YT_LOG_RELAY_CONFIG.get("client_id", "").strip()
+    csec = YT_LOG_RELAY_CONFIG.get("client_secret", "").strip()
+    rtok = YT_LOG_RELAY_CONFIG.get("refresh_token", "").strip()
+    if not (cid and csec and rtok):
+        print("[YTLogRelay] Need Client ID, Client Secret, and Refresh Token to refresh.")
+        return None
+
+    payload = urllib.parse.urlencode({
+        "client_id": cid,
+        "client_secret": csec,
+        "refresh_token": rtok,
+        "grant_type": "refresh_token",
+    }).encode()
+    try:
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=payload)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read().decode())
+        token = data.get("access_token")
+        if token:
+            YT_LOG_RELAY_CONFIG["access_token"] = token
+            save_yt_log_relay_config()
+            print("[YTLogRelay] Access token refreshed.")
+        return token
+    except Exception as e:
+        print(f"[YTLogRelay] Token refresh failed: {e}")
+        return None
+
+def yt_relay_send_message(text):
+    """
+    Sends one line of text into the target live chat via liveChat.messages.insert,
+    by shelling out to curl (equivalent to running the curl command below by hand):
+
+        curl -X POST "https://www.googleapis.com/youtube/v3/liveChat/messages?part=snippet" \
+          -H "Authorization: Bearer <access_token>" \
+          -H "Accept: application/json" \
+          -H "Content-Type: application/json" \
+          -d '{"snippet": {"liveChatId": "<chat_id>", "type": "textMessageEvent",
+                "textMessageDetails": {"messageText": "<text>"}}}'
+
+    Auto-refreshes the access token on a 401 and retries once.
+    """
+    import subprocess
+    import json as _json
+
+    chat_id = YT_LOG_RELAY_CONFIG.get("live_chat_id", "").strip()
+    if not chat_id:
+        return False
+    text = text.strip()
+    if not text:
+        return False
+    if len(text) > 200:   # YouTube live chat message length limit
+        text = text[:197] + "..."
+
+    def _curl_post(token):
+        body = _json.dumps({
+            "snippet": {
+                "liveChatId": chat_id,
+                "type": "textMessageEvent",
+                "textMessageDetails": {"messageText": text},
+            }
+        })
+        cmd = [
+            "curl", "-sS", "-X", "POST",
+            "https://www.googleapis.com/youtube/v3/liveChat/messages?part=snippet",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "Accept: application/json",
+            "-H", "Content-Type: application/json",
+            "-w", "\n%{http_code}",
+            "-d", body,
+        ]
+        # List-form subprocess call -- no shell=True, so the token/body are passed
+        # as literal argv entries and never touch a shell for interpretation.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        stdout = result.stdout.strip()
+        # The "-w" flag appended the HTTP status code as the final line of stdout.
+        if "\n" in stdout:
+            resp_body, _, status_code = stdout.rpartition("\n")
+        else:
+            resp_body, status_code = "", stdout
+        try:
+            status = int(status_code.strip())
+        except ValueError:
+            status = 0
+        return status, resp_body, result.returncode
+
+    token = YT_LOG_RELAY_CONFIG.get("access_token", "").strip()
+    if not token:
+        return False
+    try:
+        status, resp_body, rc = _curl_post(token)
+        if rc == 0 and 200 <= status < 300:
+            return True
+        if status == 401:
+            new_token = yt_relay_refresh_access_token()
+            if new_token:
+                status2, resp_body2, rc2 = _curl_post(new_token)
+                if rc2 == 0 and 200 <= status2 < 300:
+                    return True
+                print(f"[YTLogRelay] curl send failed after refresh (HTTP {status2}): {resp_body2[:200]}")
+                return False
+        print(f"[YTLogRelay] curl send failed (HTTP {status}): {resp_body[:200]}")
+        return False
+    except subprocess.TimeoutExpired:
+        print("[YTLogRelay] curl send timed out.")
+        return False
+    except Exception as e:
+        print(f"[YTLogRelay] curl send error: {e}")
+        return False
+
+def _yt_relay_worker():
+    """
+    Background thread: drains the console-log queue and forwards each line to
+    the live chat, one at a time, with a short delay between sends so it can't
+    flood chat or blow through the API's per-minute quota.
+    """
+    while not _yt_relay_stop_event.is_set():
+        try:
+            line = _yt_relay_queue.get(timeout=0.5)
+        except _yt_relay_queue_module.Empty:
+            continue
+        if YT_LOG_RELAY_CONFIG.get("enabled"):
+            try:
+                yt_relay_send_message(line)
+            except Exception:
+                pass
+        time.sleep(1.2)   # stay well under YouTube live chat's rate limits
+
+def start_yt_log_relay_worker():
+    global _yt_relay_thread
+    if _yt_relay_thread is None or not _yt_relay_thread.is_alive():
+        _yt_relay_stop_event.clear()
+        _yt_relay_thread = threading.Thread(target=_yt_relay_worker, daemon=True)
+        _yt_relay_thread.start()
+
+def enqueue_log_line_for_yt_relay(text):
+    """Called from ConsoleRedirect.write() for every console line. Cheap/non-blocking."""
+    if YT_LOG_RELAY_CONFIG.get("enabled") and text and text.strip():
+        try:
+            _yt_relay_queue.put_nowait(text.strip())
+        except Exception:
+            pass
+
 # ========================= SOUND & TTS CONFIG =========================
 SOUND_CONFIG_FILE = "sound_config.json"
 SOUND_CONFIG = {
@@ -3751,6 +4235,144 @@ def play_event_sound(event_key: str):
         except Exception as err:
             print(f"[Sound] Error playing '{sound_file}': {err}")
     threading.Thread(target=_play, daemon=True).start()
+
+# ========================= MRTRISTINAI (GROQ CHAT) CONFIG =========================
+MRTRISTINAI_CONFIG_FILE = "mrtristinai_config.json"
+MRTRISTINAI_CONFIG_DEFAULT_PROMPT = (
+    "You are MrTristinAI, the built-in AI assistant of UltraBot Control Panel "
+    "(a YouTube livestream chat-bot / VM control app). You run on "
+    "Groq's LPU infrastructure. Introduce yourself as MrTristinAI if asked who "
+    "you are, and don't claim to be ChatGPT, Gemini, or any other assistant. "
+    "Be concise, friendly, and helpful."
+)
+MRTRISTINAI_CONFIG = {
+    "groq_api_key": "",                        # saved once entered, never shown again in plain sight after restart
+    "model":        "llama-3.3-70b-versatile",  # default Groq model
+    "system_prompt": MRTRISTINAI_CONFIG_DEFAULT_PROMPT,
+}
+GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODELS_URL           = "https://api.groq.com/openai/v1/models"
+
+# urllib's default "Python-urllib/x.y" User-Agent gets blocked by Cloudflare
+# (which fronts api.groq.com) as an automated-request signature — that's
+# Cloudflare error 1010, not an actual Groq/API-key problem. Sending a
+# normal browser-style User-Agent avoids it.
+GROQ_REQUEST_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "application/json",
+}
+
+# A reasonable, hand-maintained fallback list — used if we can't reach
+# Groq's /models endpoint (e.g. no key yet, or offline) so the dropdown
+# is never empty.
+MRTRISTINAI_FALLBACK_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+]
+
+
+def load_mrtristinai_config():
+    global MRTRISTINAI_CONFIG
+    try:
+        if os.path.exists(MRTRISTINAI_CONFIG_FILE):
+            with open(MRTRISTINAI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            MRTRISTINAI_CONFIG.update(data)
+            print("[MrTristinAI] Config loaded.")
+    except Exception as e:
+        print(f"[MrTristinAI] Load error: {e}")
+
+
+def save_mrtristinai_config():
+    try:
+        with open(MRTRISTINAI_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(MRTRISTINAI_CONFIG, f, indent=2)
+        print("[MrTristinAI] Config saved.")
+    except Exception as e:
+        print(f"[MrTristinAI] Save error: {e}")
+
+
+def groq_list_models(api_key: str):
+    """
+    Fetches the list of available model IDs from Groq's /models endpoint.
+    Returns a list of model id strings, or the fallback list on any error
+    (bad key, no internet, endpoint change, etc.) so the caller never has
+    to special-case failure.
+    """
+    if not api_key:
+        return list(MRTRISTINAI_FALLBACK_MODELS)
+    try:
+        req = urllib.request.Request(
+            GROQ_MODELS_URL,
+            headers={**GROQ_REQUEST_HEADERS, "Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        return sorted(ids) if ids else list(MRTRISTINAI_FALLBACK_MODELS)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(body).get("error", {}).get("message", body)
+        except Exception:
+            detail = body
+        print(f"[MrTristinAI] Could not fetch model list (HTTP {e.code}): {detail} — using fallback list.")
+        return list(MRTRISTINAI_FALLBACK_MODELS)
+    except Exception as e:
+        print(f"[MrTristinAI] Could not fetch model list, using fallback list: {e}")
+        return list(MRTRISTINAI_FALLBACK_MODELS)
+
+
+def groq_chat_completion(api_key: str, model: str, messages: list):
+    """
+    Sends a chat completion request to Groq (OpenAI-compatible endpoint).
+    messages: list of {"role": "user"/"assistant"/"system", "content": str}
+    Returns the assistant's reply text.
+    Raises an exception on any failure — the caller is expected to catch
+    it and show the message to the user.
+    """
+    if not api_key:
+        raise ValueError("No Groq API key set. Enter one in the MrTristinAI tab first.")
+
+    payload = json.dumps({
+        "model":    model,
+        "messages": messages,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        GROQ_CHAT_COMPLETIONS_URL,
+        data=payload,
+        method="POST",
+        headers={
+            **GROQ_REQUEST_HEADERS,
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            body_json = json.loads(body)
+            detail = body_json.get("error", {}).get("message", body)
+        except Exception:
+            detail = body
+        raise ValueError(f"Groq API error (HTTP {e.code}): {detail}") from None
+
+    choices = data.get("choices", [])
+    if not choices:
+        raise ValueError(f"Groq returned no response: {data}")
+    return choices[0]["message"]["content"]
+
+
 
 # ========================= MULTI-STREAM CONFIG =========================
 MULTI_STREAM_CONFIG_FILE = "multi_stream_config.json"
@@ -4222,7 +4844,12 @@ OBS_CONFIG = {
     "os_scenes": {},
     # Per-OS switching scenes — {trigger_key: obs_scene_name}. Shown the moment
     # a switch to THAT OS starts, before its own os_scenes entry above takes over.
-    "switching_scenes": {}
+    "switching_scenes": {},
+    # Per-OS RECEIVER switching scenes — {trigger_key: obs_scene_name}. Shown ONLY on the
+    # machine that is RECEIVING a Host-Switch handoff, the moment it accepts the incoming
+    # VM -- lets the receiver show a different "incoming" scene than whatever the sender
+    # shows on its own end via "switching_scenes" above.
+    "recv_switching_scenes": {}
 }
 
 def load_obs_config():
@@ -4285,6 +4912,69 @@ def obs_set_scene(scene_name: str):
         print(f'[OBS] Scene switch error: Python exception: "{traceback.format_exc()}"')
         log_error("OBS", e)
 
+def _video_panel_window_capture_string(timeout=2):
+    """Build the exact encoded value OBS's xcomposite_input source expects for its
+    "capture_window" setting: "<X11 window id>\\r\\n<window title>\\r\\n<window class>".
+    OBS's linux-capture plugin (xcomposite-input.c) matches PRIMARILY by the numeric
+    window id (falling back to title/class only if no id match is found), so getting
+    the id right is what actually makes the bind work -- title/class alone are not
+    enough. Reads the Tk widget's properties on the Tk mainloop thread (like
+    _video_ensure_window_sync) rather than directly, since this is typically called
+    from a background thread. Returns None if the video window/id isn't available."""
+    if _gui_app is None:
+        return None
+    ready = threading.Event()
+    result = {}
+    def _read():
+        try:
+            win = getattr(_gui_app, "video_toplevel", None)
+            if win is None or not win.winfo_exists():
+                ready.set()
+                return
+            win_id = win.winfo_id()
+            title = win.title() or "Video Panel"
+            try:
+                wm_class = win.winfo_class() or title
+            except Exception:
+                wm_class = title
+            result["value"] = f"{win_id}\r\n{title}\r\n{wm_class}"
+        except Exception:
+            pass
+        ready.set()
+    try:
+        _gui_app.root.after(0, _read)
+    except Exception:
+        return None
+    ready.wait(timeout)
+    return result.get("value")
+
+def obs_set_source_window_capture(source_name: str, capture_window_value: str):
+    """Set an OBS Window Capture (Xcomposite) source's "capture_window" value so it
+    captures the actual Video Panel window. IMPORTANT: obs-studio's xcomposite_input
+    source (plugins/linux-capture/xcomposite-input.c) does NOT have a "window" setting
+    key -- that key is silently ignored -- and its real "capture_window" property is not
+    a plain title string. It's an encoded "<x11 window id>\\r\\n<title>\\r\\n<class>"
+    triplet (see WIN_STRING_DIV in that source file), matched primarily by the numeric
+    window id. Build capture_window_value with _video_panel_window_capture_string()."""
+    if not _obs_connected or not _obs_client or not source_name or not capture_window_value:
+        return False
+    try:
+        try:
+            _obs_client.set_input_settings(
+                source_name,
+                {"capture_window": capture_window_value, "show_cursor": False},
+                True,
+            )
+            print(f"[OBS] Source '{source_name}' → window '{capture_window_value.splitlines()[1] if chr(10) in capture_window_value else capture_window_value}'")
+            return True
+        except TypeError:
+            _obs_client.set_input_settings(source_name, {"capture_window": capture_window_value}, True)
+            print(f"[OBS] Source '{source_name}' → window '{capture_window_value.splitlines()[1] if chr(10) in capture_window_value else capture_window_value}'")
+            return True
+    except Exception:
+        print(f'[OBS] Could not bind source "{source_name}" to window: Python exception: "{traceback.format_exc()}"')
+        return False
+
 def obs_trigger(event: str):
     """Fire a named trigger event if OBS is enabled and connected."""
     if not OBS_CONFIG.get("enabled") or not _obs_connected:
@@ -4292,6 +4982,388 @@ def obs_trigger(event: str):
     scene = OBS_CONFIG["triggers"].get(event, "")
     if scene:
         threading.Thread(target=obs_set_scene, args=(scene,), daemon=True).start()
+
+# ========================= PER-OS HOST SWITCHING (EXPERIMENTAL) =========================
+# Lets two machines running this same bot -- one per OS -- hand a live stream back and
+# forth: whichever machine is currently live tells the OTHER machine "boot up and take
+# over," while it fades its own OBS scene out and stops its own stream. See the
+# "Per-OS Host Switching (EXPERIMENTAL)" panel on the OS Voting tab.
+HOST_SWITCH_CONFIG_FILE  = "host_switch_config.json"
+HOST_SWITCH_SENDER_URL   = "https://stale-chicken-beam.loca.lt"
+HOST_SWITCH_RECEIVER_URL = "https://good-soup-beam.loca.lt"
+CURRENT_VM_FILE          = "current_vm.json"
+
+HOST_SWITCH_CONFIG = {
+    "role":               "Sender",   # "Sender" or "Receiver" -- auto-detected at startup
+    "obs_ws_address":     "",         # e.g. ws://localhost:4455 -- THIS machine's own OBS,
+                                       # independent of the OBS_CONFIG host/port used elsewhere
+    "switching_scene":    "",         # OBS scene shown on both ends during a handoff
+    "migration_software": "None",     # "None", "Hyper-V", "UTM", or "Parallels Desktop"
+    "local_port":         8765,       # port this machine's signaling server listens on --
+                                       # what you point `lt --port 8765 --subdomain ...` at
+    "sync_vm_name":       False,      # if True, push this machine's VM name to the other
+                                       # Host-Switch machine whenever the watchdog restarts it
+                                       # or a handoff is sent, so both sides agree on "current"
+}
+
+_host_switch_server    = None
+_host_switch_other_os  = None   # OS string reported by the other machine's /whoami, once known
+
+def load_host_switch_config():
+    global HOST_SWITCH_CONFIG
+    try:
+        if os.path.exists(HOST_SWITCH_CONFIG_FILE):
+            with open(HOST_SWITCH_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            HOST_SWITCH_CONFIG.update(data)
+            print("[HostSwitch] Config loaded.")
+    except Exception:
+        print(f'[HostSwitch] Load error: Python exception: "{traceback.format_exc()}"')
+
+def save_host_switch_config():
+    try:
+        with open(HOST_SWITCH_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(HOST_SWITCH_CONFIG, f, indent=2)
+        print("[HostSwitch] Config saved.")
+    except Exception:
+        print(f'[HostSwitch] Save error: Python exception: "{traceback.format_exc()}"')
+
+def host_switch_current_os():
+    """Returns this machine's OS as one of 'Windows', 'macOS', 'Linux'."""
+    sysname = platform.system()
+    if sysname == "Darwin":
+        return "macOS"
+    if sysname == "Windows":
+        return "Windows"
+    return "Linux"
+
+def save_current_vm(vm_name, backend=None):
+    """Writes current_vm.json -- what the OTHER machine reads on a handoff to know which
+    VM to boot once it takes over."""
+    try:
+        data = {"vm": vm_name, "backend": backend or globals().get("current_vm_backend"),
+                "saved_at": time.time()}
+        with open(CURRENT_VM_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"[HostSwitch] Saved current_vm.json -> {vm_name}")
+    except Exception:
+        print(f'[HostSwitch] current_vm.json save error: Python exception: "{traceback.format_exc()}"')
+
+def load_current_vm():
+    try:
+        if os.path.exists(CURRENT_VM_FILE):
+            with open(CURRENT_VM_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        print(f'[HostSwitch] current_vm.json load error: Python exception: "{traceback.format_exc()}"')
+    return {}
+
+# ── migration-software dispatch: Hyper-V / UTM / Parallels Desktop ──
+def migration_start_vm(vm_name):
+    """Starts vm_name with whichever hypervisor CLI is selected on the panel. Falls back
+    to this file's own normal vm_start()/backend path when 'None' is selected (i.e. both
+    hosts are running the same hypervisor this script already drives directly)."""
+    software = HOST_SWITCH_CONFIG.get("migration_software", "None")
+    try:
+        if software == "Hyper-V":
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                             f"Start-VM -Name '{vm_name}'"], check=False, timeout=60)
+        elif software == "UTM":
+            subprocess.run(["utmctl", "start", vm_name], check=False, timeout=60)
+        elif software == "Parallels Desktop":
+            subprocess.run(["prlctl", "start", vm_name], check=False, timeout=60)
+        else:
+            vm_start(vm_name, globals().get("current_vm_backend"), gui=True)
+        print(f"[HostSwitch] Start VM '{vm_name}' via {software}")
+        return True
+    except Exception as e:
+        print(f"[HostSwitch] migration_start_vm failed ({software}): {e}")
+        return False
+
+def migration_stop_vm(vm_name):
+    software = HOST_SWITCH_CONFIG.get("migration_software", "None")
+    try:
+        if software == "Hyper-V":
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                             f"Stop-VM -Name '{vm_name}' -Force"], check=False, timeout=60)
+        elif software == "UTM":
+            subprocess.run(["utmctl", "stop", vm_name], check=False, timeout=60)
+        elif software == "Parallels Desktop":
+            subprocess.run(["prlctl", "stop", vm_name], check=False, timeout=60)
+        else:
+            robust_vm_poweroff(vm_name, globals().get("current_vm_backend"), source="HostSwitch/stop")
+        print(f"[HostSwitch] Stop VM '{vm_name}' via {software}")
+        return True
+    except Exception as e:
+        print(f"[HostSwitch] migration_stop_vm failed ({software}): {e}")
+        return False
+
+# ── setup-instruction prompts (printed to console/log -- also mirrored to YT chat if the
+#    log relay panel above is enabled) ──
+def print_host_switch_setup_instructions(target_os):
+    lines = {
+        "macOS": [
+            "Per-OS Host Switching -> macOS setup:",
+            "  1. Install localtunnel on this Mac:  npm install -g localtunnel",
+            "  2. Run:  lt --port <local_port from the panel> --subdomain <your subdomain>",
+            "  3. In OBS on this Mac, enable obs-websocket (Tools -> obs-websocket Settings) "
+            "and paste that ws:// address into the panel's OBS Websocket Address field.",
+            "  4. If using UTM or Parallels Desktop, select it under Migration Software and "
+            "make sure `utmctl` / `prlctl` is on PATH.",
+        ],
+        "Linux": [
+            "Per-OS Host Switching -> Linux setup:",
+            "  1. Install localtunnel:  npm install -g localtunnel",
+            "  2. Run:  lt --port <local_port from the panel> --subdomain <your subdomain>",
+            "  3. In OBS on this machine, enable obs-websocket and paste the ws:// address "
+            "into the panel's OBS Websocket Address field.",
+            "  4. Libvirt/VirtualBox VMs are driven directly by this bot -- leave Migration "
+            "Software set to None unless you're actually running Hyper-V/UTM/Parallels here.",
+        ],
+        "Windows": [
+            "Per-OS Host Switching -> Windows setup:",
+            "  1. Install localtunnel:  npm install -g localtunnel",
+            "  2. Run:  lt --port <local_port from the panel> --subdomain <your subdomain>",
+            "  3. In OBS on this PC, enable obs-websocket and paste the ws:// address into "
+            "the panel's OBS Websocket Address field.",
+            "  4. If this PC is the Hyper-V host for another OS's VM, select Hyper-V under "
+            "Migration Software and run the bot as Administrator (Hyper-V's cmdlets require it).",
+        ],
+    }
+    for line in lines.get(target_os, [f"No setup instructions available for '{target_os}'."]):
+        print(f"[HostSwitch] {line}")
+
+# ── local signaling server: /ping, /whoami, /whoami_report, /start_vm ──
+class _HostSwitchHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass  # keep the console log clean -- this fires on every poll
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.startswith("/ping"):
+            self._send_json(200, {"ok": True})
+        elif self.path.startswith("/whoami"):
+            self._send_json(200, {"os": host_switch_current_os(),
+                                   "role": HOST_SWITCH_CONFIG.get("role", "Sender")})
+        else:
+            self._send_json(404, {"error": "not found"})
+
+    def do_POST(self):
+        global _host_switch_other_os
+        if self.path.startswith("/start_vm"):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                data = {}
+            vm_name    = data.get("vm", "")
+            scene      = data.get("scene", "")
+            recv_scene = data.get("recv_scene", "")
+            self._send_json(200, {"ok": True})
+            threading.Thread(target=_host_switch_receive_start, args=(vm_name, scene, recv_scene), daemon=True).start()
+        elif self.path.startswith("/whoami_report"):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length) or b"{}")
+                _host_switch_other_os = data.get("os")
+                print(f"[HostSwitch] Other host reported its OS: {_host_switch_other_os}")
+            except Exception:
+                pass
+            self._send_json(200, {"ok": True})
+        elif self.path.startswith("/sync_vm_name"):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length) or b"{}")
+                vm_name = data.get("vm", "")
+                if vm_name:
+                    save_current_vm(vm_name)
+                    print(f"[HostSwitch] Synced VM name from other host: '{vm_name}'")
+            except Exception:
+                print(f'[HostSwitch] /sync_vm_name error: Python exception: "{traceback.format_exc()}"')
+            self._send_json(200, {"ok": True})
+        else:
+            self._send_json(404, {"error": "not found"})
+
+def _host_switch_receive_start(vm_name, scene, recv_scene=""):
+    """Runs on the RECEIVING machine once the Sender hands off: switch scene, start the
+    stream, start the VM that was assigned in current_vm.json. Uses recv_scene (this OS's
+    "Receiver Scene" from the OBS tab) instead of `scene` when one was provided, so the
+    receiving machine can show a different "incoming" scene than the sender used."""
+    print(f"[HostSwitch] Received handoff -- starting '{vm_name}'")
+    effective_scene = recv_scene or scene
+    if effective_scene:
+        obs_set_scene(effective_scene)
+    try:
+        if _obs_connected and _obs_client:
+            _obs_client.start_stream()
+            print("[HostSwitch] OBS stream started on receiver.")
+    except Exception:
+        print(f'[HostSwitch] Could not start OBS stream: Python exception: "{traceback.format_exc()}"')
+    migration_start_vm(vm_name)
+
+def host_switch_sync_vm_name(vm_name):
+    """Fire-and-forget: tells the other Host-Switch machine to treat vm_name as the current
+    VM too, so all Per-OS Host Switching machines agree on which VM is "current" even
+    outside of an actual handoff (e.g. after the Auto-Start Watchdog restarts it locally).
+    Gated by the "Sync VM Name to Receiver" checkbox on the Main tab."""
+    import urllib.request
+    other = _host_switch_other_url()
+    def _send():
+        try:
+            body = json.dumps({"vm": vm_name}).encode()
+            req = urllib.request.Request(f"{other}/sync_vm_name", data=body,
+                                          headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=10)
+            print(f"[HostSwitch] Synced VM name '{vm_name}' to {other}")
+        except Exception:
+            print(f'[HostSwitch] Could not sync VM name to {other}: Python exception: "{traceback.format_exc()}"')
+    threading.Thread(target=_send, daemon=True).start()
+
+def start_host_switch_server():
+    global _host_switch_server
+    try:
+        port = int(HOST_SWITCH_CONFIG.get("local_port", 8765))
+        _host_switch_server = socketserver.TCPServer(("0.0.0.0", port), _HostSwitchHandler)
+        threading.Thread(target=_host_switch_server.serve_forever, daemon=True).start()
+        print(f"[HostSwitch] Signaling server listening on :{port} "
+              f"(tunnel it with:  lt --port {port} --subdomain <yours>)")
+    except Exception:
+        print(f'[HostSwitch] Could not start signaling server: Python exception: "{traceback.format_exc()}"')
+
+def _host_switch_other_url():
+    role = HOST_SWITCH_CONFIG.get("role", "Sender")
+    return HOST_SWITCH_RECEIVER_URL if role == "Sender" else HOST_SWITCH_SENDER_URL
+
+def host_switch_test_connection_and_handshake():
+    """Startup routine: ping the other machine, and if it answers, ask it which OS it's
+    running (and tell it which OS we're running) so 'Current' in the OS Host dropdown can
+    be populated automatically. Safe to run even if the other side isn't up yet."""
+    global _host_switch_other_os
+    import urllib.request
+    other = _host_switch_other_url()
+    try:
+        r = urllib.request.urlopen(f"{other}/ping", timeout=8)
+        if r.status != 200:
+            raise Exception(f"bad status {r.status}")
+        print(f"[HostSwitch] Connected to other host at {other}")
+        r2 = urllib.request.urlopen(f"{other}/whoami", timeout=8)
+        info = json.loads(r2.read().decode())
+        _host_switch_other_os = info.get("os")
+        print(f"[HostSwitch] Other host reports OS: {_host_switch_other_os}")
+        try:
+            body = json.dumps({"os": host_switch_current_os()}).encode()
+            req = urllib.request.Request(f"{other}/whoami_report", data=body,
+                                          headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=8)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[HostSwitch] No connection to other host at {other} yet ({e}).")
+
+def host_switch_autodetect_role():
+    """If a Sender already answers at its URL, become Receiver -- otherwise default to
+    Sender. Only runs when there's no saved config yet, so it never overrides a role you
+    picked and saved by hand on the panel."""
+    global HOST_SWITCH_CONFIG
+    import urllib.request
+    if os.path.exists(HOST_SWITCH_CONFIG_FILE):
+        return
+    try:
+        r = urllib.request.urlopen(f"{HOST_SWITCH_SENDER_URL}/ping", timeout=5)
+        if r.status == 200:
+            HOST_SWITCH_CONFIG["role"] = "Receiver"
+            print("[HostSwitch] Detected an existing Sender -- defaulting this machine to Receiver.")
+            return
+    except Exception:
+        pass
+    HOST_SWITCH_CONFIG["role"] = "Sender"
+    print("[HostSwitch] No Sender detected -- defaulting this machine to Sender.")
+
+def host_switch_send_handoff(vm_name, scene, recv_scene=""):
+    """Runs on the SENDING machine: switch our own OBS scene, stop our own stream, save
+    current_vm.json, then tell the other machine to switch scene / start stream / start VM.
+    recv_scene (optional) is the scene the OTHER machine should use instead of `scene` --
+    set per-OS on the OBS tab's "Receiver Scene" column."""
+    import urllib.request
+    if scene:
+        obs_set_scene(scene)
+    try:
+        if _obs_connected and _obs_client:
+            _obs_client.stop_stream()
+            print("[HostSwitch] OBS stream stopped on sender.")
+    except Exception:
+        print(f'[HostSwitch] Could not stop OBS stream: Python exception: "{traceback.format_exc()}"')
+    save_current_vm(vm_name)
+    if HOST_SWITCH_CONFIG.get("sync_vm_name"):
+        host_switch_sync_vm_name(vm_name)
+    other = _host_switch_other_url()
+    try:
+        body = json.dumps({"vm": vm_name, "scene": scene, "recv_scene": recv_scene}).encode()
+        req = urllib.request.Request(f"{other}/start_vm", data=body,
+                                      headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(req, timeout=10)
+        print(f"[HostSwitch] Handoff sent to {other} for VM '{vm_name}'")
+    except Exception:
+        print(f'[HostSwitch] Handoff send failed: Python exception: "{traceback.format_exc()}"')
+
+_HOST_SWITCH_CMD_RE = re.compile(
+    r"^(?P<os>win(?:dows)?|mac(?:os)?|linux)(?P<rest>[a-z0-9_]*)$", re.IGNORECASE)
+
+def try_handle_host_switch_command(cmd_no_bang):
+    """Matches chat commands shaped like !{os}{name}{vm} or !{os}{vm}, e.g. winwin11,
+    macmonterey, linuxmint (the '!' is already stripped by the caller). Returns True if it
+    handled the command, False if cmd_no_bang isn't one of these at all -- so callers can
+    fall through to their normal command handling on a miss."""
+    m = _HOST_SWITCH_CMD_RE.match((cmd_no_bang or "").strip())
+    if not m:
+        return False
+    os_token = m.group("os").lower()
+    target_os = {"win": "Windows", "windows": "Windows",
+                 "mac": "macOS", "macos": "macOS",
+                 "linux": "Linux"}.get(os_token, "Windows")
+
+    print_host_switch_setup_instructions(target_os)
+
+    rest = m.group("rest") or ""
+    # rest is the {name}{vm} portion -- match it against OS_LIST entries whose trigger
+    # (with the os prefix stripped) matches, falling back to using it directly as a VM name.
+    vm_name = rest
+    for entry in OS_LIST:
+        trig = (entry.get("trigger") or "").lower().lstrip("!")
+        if trig == rest or (rest and trig.endswith(rest)):
+            vm_name = entry.get("vm", rest)
+            break
+
+    scene = HOST_SWITCH_CONFIG.get("switching_scene", "")
+    os_trigger_key = {"Windows": "win", "macOS": "mac", "Linux": "linux"}.get(target_os, os_token)
+    recv_scene = (OBS_CONFIG.get("recv_switching_scenes", {}).get(os_token, "")
+                  or OBS_CONFIG.get("recv_switching_scenes", {}).get(os_trigger_key, ""))
+    role = HOST_SWITCH_CONFIG.get("role", "Sender")
+    if role == "Sender":
+        threading.Thread(target=host_switch_send_handoff, args=(vm_name, scene, recv_scene), daemon=True).start()
+    else:
+        # A Receiver getting this chat command directly relays it to the actual Sender
+        # instead of acting on it locally.
+        def _relay():
+            import urllib.request
+            other = _host_switch_other_url()
+            try:
+                body = json.dumps({"vm": vm_name, "scene": scene, "recv_scene": recv_scene}).encode()
+                req = urllib.request.Request(f"{other}/start_vm", data=body,
+                                              headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=10)
+            except Exception:
+                print(f'[HostSwitch] Could not relay command to Sender: Python exception: "{traceback.format_exc()}"')
+        threading.Thread(target=_relay, daemon=True).start()
+    return True
+
 
 
 
@@ -4392,7 +5464,20 @@ def save_auto_start_config():
     except Exception as e:
         print(f'[AutoStart] Save error: Python exception: "{traceback.format_exc()}"')
 
-AUTOSTART_EVERYTHING_CONFIG_FILE = "autostarteverything.json"
+# Anchored to the script's own folder (like video_id.json and the other
+# relaunch-carried files already are), NOT left as a bare relative filename.
+# A bare relative name resolves against the process's current working
+# directory, which is NOT guaranteed to be the same every time the script is
+# started -- a terminal opened elsewhere, a desktop launcher, an IDE's "Run"
+# button, etc. can all use a different CWD. When that happens, a save from
+# one launch and a load from the next silently read/write two completely
+# different files, so a backend/VM switch appears to just not have been
+# autosaved at all once the app is relaunched, even though the write itself
+# succeeded (just to the wrong place). Anchoring to the script's own
+# directory makes it the same physical file every time, independent of CWD.
+AUTOSTART_EVERYTHING_CONFIG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(sys.argv[0])), "autostarteverything.json"
+)
 
 # ── Pre-execution safety/copyright screening -- Gemini or Groq, selectable ──
 # Gemini uses the current (as of July 2026) google-genai SDK, NOT the deprecated
@@ -4414,7 +5499,7 @@ GEMINI_CONFIG_FILE = "gemini_config.json"   # filename kept as-is for backward
 GEMINI_MODEL = "gemini-3.6-flash"
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-gemini_config = {"enabled": False, "provider": "gemini", "gemini_api_key": "", "groq_api_key": ""}
+gemini_config = {"enabled": False, "provider": "gemini", "gemini_api_key": "", "groq_api_key": "", "media_restricted": False}
 _gemini_client = None
 _groq_client = None
 
@@ -4430,17 +5515,20 @@ def load_gemini_config():
             if "api_key" in loaded and "gemini_api_key" not in loaded:
                 loaded["gemini_api_key"] = loaded.pop("api_key")
             gemini_config.update(loaded)
+        gemini_config.setdefault("media_restricted", False)
+        set_media_request_restriction(bool(gemini_config.get("media_restricted", False)))
         print(f"[AI Safety] Config loaded. Enabled={gemini_config.get('enabled')}, "
-              f"provider={gemini_config.get('provider')}")
+              f"provider={gemini_config.get('provider')}, media_restricted={MEDIA_REQUEST_RESTRICTED}")
     except Exception as e:
         print(f'[AI Safety] Load error: Python exception: "{traceback.format_exc()}"')
 
 def save_gemini_config():
     try:
+        gemini_config["media_restricted"] = bool(MEDIA_REQUEST_RESTRICTED)
         with open(GEMINI_CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(gemini_config, f, indent=2)
         print(f"[AI Safety] Config saved. Enabled={gemini_config.get('enabled')}, "
-              f"provider={gemini_config.get('provider')}")
+              f"provider={gemini_config.get('provider')}, media_restricted={gemini_config.get('media_restricted')}")
     except Exception as e:
         print(f'[AI Safety] Save error: Python exception: "{traceback.format_exc()}"')
 
@@ -4725,7 +5813,8 @@ def ai_check_risk(text, kind="text"):
 def save_autostart_everything_config(backend=None, vm=None, watchdog=None, test_mode=None,
                                       os_voting_vm=None, os_voting_backend=None,
                                       ai_safety_enabled=None, ai_safety_provider=None,
-                                      music_playback_enabled=None, video_playback_enabled=None):
+                                      music_playback_enabled=None, video_playback_enabled=None,
+                                      save_backend=None):
     """Persists backend, VM, Auto-Start Watchdog, Test Mode, last-active OS Voting
     VM+backend, AI Safety screening enabled+provider, and automatic music/video
     playback enabled to a single unified file so startup (or any relaunch -- update
@@ -4751,11 +5840,23 @@ def save_autostart_everything_config(backend=None, vm=None, watchdog=None, test_
                     existing = json.load(f)
             except Exception:
                 pass   # corrupt/unreadable -- fine to start fresh below
+        # Determine whether the saved config should persist backend changes.
+        # `save_backend` explicitly overrides the existing flag when provided;
+        # otherwise, fall back to whatever is already stored (default True).
+        existing_save_backend = bool(existing.get("save_backend", True))
+        save_backend_flag = save_backend if save_backend is not None else existing_save_backend
+
+        # Preserve the current saved backend/VM selection whenever the user has opted
+        # out of persisting backend changes. That prevents an empty/temporary selection
+        # from clearing the relaunch config while the checkbox is unchecked.
+        stored_backend = existing.get("backend", "vmware")
+        stored_vm = existing.get("vm", "")
         data = {
-            "backend": backend if backend is not None else existing.get("backend", "vmware"),
-            "vm": vm if vm is not None else existing.get("vm", ""),
+            "backend": (backend if backend is not None and save_backend_flag else stored_backend),
+            "vm": (vm if vm is not None and save_backend_flag else stored_vm),
             "auto_start_watchdog": watchdog if watchdog is not None else existing.get("auto_start_watchdog", False),
             "test_mode": test_mode if test_mode is not None else existing.get("test_mode", False),
+            "save_backend": save_backend_flag,
             "os_voting_vm": os_voting_vm if os_voting_vm is not None else existing.get("os_voting_vm", ""),
             "os_voting_backend": os_voting_backend if os_voting_backend is not None else existing.get("os_voting_backend", ""),
             "ai_safety_enabled": ai_safety_enabled if ai_safety_enabled is not None else existing.get("ai_safety_enabled", False),
@@ -4771,10 +5872,10 @@ def save_autostart_everything_config(backend=None, vm=None, watchdog=None, test_
         print(f'[AutostartEverything] Save error: Python exception: "{traceback.format_exc()}"')
 
 def load_autostart_everything_config():
-    """Returns (backend, vm, watchdog, test_mode, os_voting_vm, os_voting_backend,
-    ai_safety_enabled, ai_safety_provider, music_playback_enabled,
+    """Returns (backend, vm, watchdog, test_mode, save_backend, os_voting_vm,
+    os_voting_backend, ai_safety_enabled, ai_safety_provider, music_playback_enabled,
     video_playback_enabled) from the last saved state, or
-    ("vmware", "", False, False, "", "", False, "gemini", False, False) if none
+    ("vmware", "", False, False, True, "", "", False, "gemini", False, False) if none
     exists yet (first-ever launch). ai_safety_enabled/ai_safety_provider/
     music_playback_enabled/video_playback_enabled are returned for completeness but
     are NOT applied by the startup restore logic -- see
@@ -4782,33 +5883,56 @@ def load_autostart_everything_config():
     files are the authoritative source for those specifically."""
     abs_path = os.path.abspath(AUTOSTART_EVERYTHING_CONFIG_FILE)
     try:
-        if os.path.exists(AUTOSTART_EVERYTHING_CONFIG_FILE):
-            with open(AUTOSTART_EVERYTHING_CONFIG_FILE, "r", encoding="utf-8") as f:
+        source_path = AUTOSTART_EVERYTHING_CONFIG_FILE
+        if not os.path.exists(source_path):
+            # One-time migration: versions before this fix saved to a bare relative
+            # "autostarteverything.json", which resolved against whatever the
+            # process's CWD happened to be at the time -- not necessarily this
+            # script's own folder. If the new, folder-anchored file doesn't exist
+            # yet but a legacy one is sitting in the current working directory,
+            # adopt it once so a backend switch made under the old behavior isn't
+            # silently lost, then immediately re-save it to the anchored path below
+            # so this check doesn't need to do anything on future launches.
+            legacy_path = "autostarteverything.json"
+            if os.path.exists(legacy_path) and os.path.abspath(legacy_path) != abs_path:
+                source_path = legacy_path
+                print(f"[AutostartEverything] No config at {abs_path} yet -- "
+                      f"found a legacy one at {os.path.abspath(legacy_path)}, migrating it.")
+        if os.path.exists(source_path):
+            with open(source_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             backend                = data.get("backend", "vmware")
             vm                     = data.get("vm", "")
-            watchdog                = data.get("auto_start_watchdog", False)
+            watchdog               = data.get("auto_start_watchdog", False)
             test_mode              = data.get("test_mode", False)
-            os_voting_vm            = data.get("os_voting_vm", "")
-            os_voting_backend       = data.get("os_voting_backend", "")
-            ai_safety_enabled       = data.get("ai_safety_enabled", False)
-            ai_safety_provider      = data.get("ai_safety_provider", "gemini")
-            music_playback_enabled  = data.get("music_playback_enabled", False)
-            video_playback_enabled  = data.get("video_playback_enabled", False)
+            save_backend           = bool(data.get("save_backend", True))
+            os_voting_vm           = data.get("os_voting_vm", "")
+            os_voting_backend      = data.get("os_voting_backend", "")
+            ai_safety_enabled      = data.get("ai_safety_enabled", False)
+            ai_safety_provider     = data.get("ai_safety_provider", "gemini")
+            music_playback_enabled = data.get("music_playback_enabled", False)
+            video_playback_enabled = data.get("video_playback_enabled", False)
             print(f"[AutostartEverything] Loaded backend={backend!r} vm={vm!r} "
-                  f"watchdog={watchdog!r} test_mode={test_mode!r} "
+                  f"watchdog={watchdog!r} test_mode={test_mode!r} save_backend={save_backend!r} "
                   f"os_voting_vm={os_voting_vm!r} os_voting_backend={os_voting_backend!r} "
                   f"ai_safety_enabled={ai_safety_enabled!r} ai_safety_provider={ai_safety_provider!r} "
                   f"music_playback_enabled={music_playback_enabled!r} "
-                  f"video_playback_enabled={video_playback_enabled!r} from {abs_path}")
-            return (backend, vm, watchdog, test_mode, os_voting_vm, os_voting_backend,
+                  f"video_playback_enabled={video_playback_enabled!r} from {os.path.abspath(source_path)}")
+            if source_path != AUTOSTART_EVERYTHING_CONFIG_FILE:
+                try:
+                    with open(AUTOSTART_EVERYTHING_CONFIG_FILE, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+                    print(f"[AutostartEverything] Migrated legacy config to {abs_path}")
+                except Exception:
+                    pass
+            return (backend, vm, watchdog, test_mode, save_backend, os_voting_vm, os_voting_backend,
                     ai_safety_enabled, ai_safety_provider,
                     music_playback_enabled, video_playback_enabled)
         else:
             print(f"[AutostartEverything] No saved config found at {abs_path} -- using defaults.")
     except Exception as e:
         print(f'[AutostartEverything] Load error: Python exception: "{traceback.format_exc()}"')
-    return "vmware", "", False, False, "", "", False, "gemini", False, False
+    return "vmware", "", False, False, True, "", "", False, "gemini", False, False
 
 VOTE_ACTION_COOLDOWN = 60          # seconds after a restart/revert before another can be voted
 
@@ -5881,6 +7005,8 @@ def watchdog_restart():
                     if ok:
                         update_status("Running")
                         speak_text("Running")
+                        if HOST_SWITCH_CONFIG.get("sync_vm_name"):
+                            host_switch_sync_vm_name(VMX_PATH)
                     else:
                         log_error("Watchdog", f"Failed to auto-restart VM after 3 attempts", str(err))
                         backend_hint = {"vbox": "VirtualBox", "libvirt": "virt-manager/virsh"}.get(
@@ -6054,6 +7180,38 @@ music_queue_source_url = ""
 # ---- !sr song requests: queued and played at the NEXT scheduled music change, not immediately ----
 music_song_requests = []  # list of {"url": watch/playlist url, "is_playlist": bool, "raw": original text, "user": requester}
 
+MEDIA_REQUEST_RESTRICTED = False
+
+
+def set_media_request_restriction(enabled: bool, *, note: str = "") -> bool:
+    """Turns the moderator-only gate for !sr and !vr on/off.
+
+    When enabled, only moderators/owners/admins can queue song/video requests.
+    Returns the resulting state so callers can log or reflect it.
+    """
+    global MEDIA_REQUEST_RESTRICTED
+    MEDIA_REQUEST_RESTRICTED = bool(enabled)
+    if note:
+        post_system_message(note)
+    return MEDIA_REQUEST_RESTRICTED
+
+
+def media_request_allowed(username: str = "", *, kind: str = "song", is_mod: bool = False, fallback_restrict: bool | None = None):
+    """Gate !sr / !vr requests behind YT restricted mode.
+
+    This is the fallback safety layer for media requests: even if AI screening is
+    disabled, missing, or fails open, the queue still respects the moderator-only
+    restriction. Queue-admin commands such as !skipsr / !skipvr / !clear* remain
+    allowed to moderators while ordinary viewers are blocked when restricted mode is
+    enabled.
+    """
+    restricted = bool(MEDIA_REQUEST_RESTRICTED if fallback_restrict is None else fallback_restrict)
+    if not restricted or is_mod:
+        return True, ""
+    label = "song" if kind == "song" else "video"
+    return False, f"YT restricted mode is active: only moderators can queue !{label} requests."
+
+
 def _music_parse_request(raw):
     """Turns a video id/url or playlist id/url into (watch_or_playlist_url, is_playlist)."""
     raw = (raw or "").strip().strip("<>").strip()
@@ -6066,8 +7224,13 @@ def _music_parse_request(raw):
         return f"https://www.youtube.com/playlist?list={raw}", True
     return f"https://www.youtube.com/watch?v={raw}", False
 
-def queue_song_request(raw, user=""):
+def queue_song_request(raw, user="", is_mod=False):
     """Queues a !sr request; it plays automatically the next time the music schedule advances."""
+    allowed, reason = media_request_allowed(user, kind="song", is_mod=is_mod)
+    if not allowed:
+        console_log("WARN", f"[YT Restricted] Blocked song request from {user}: {reason}")
+        notify("Song Request Blocked", reason, timeout=8)
+        return None
     risky, reason = ai_check_risk(raw, kind="song")
     if risky:
         console_log("WARN", f"[Gemini] Blocked song request from {user}: \"{raw}\" -- {reason}")
@@ -6075,6 +7238,8 @@ def queue_song_request(raw, user=""):
         return None
     url, is_playlist = _music_parse_request(raw)
     if not url: return None
+    if _enforce_blocked_media("audio", url, source_label="song request"):
+        return None
     with music_lock:
         music_song_requests.append({"url": url, "is_playlist": is_playlist, "raw": raw, "user": user})
     return url, is_playlist
@@ -6184,6 +7349,10 @@ def _music_play_queue_current(watch_url, _attempt=1):
 def music_play_url(url, shuffle_loop=False):
     """Start playing a single track, or (if shuffle_loop) a playlist url shuffled+looping."""
     global music_queue, music_queue_index, music_queue_is_playlist, music_queue_source_url, music_status_text
+    if not url:
+        return False
+    if _enforce_blocked_media("audio", url, source_label="music queue"):
+        return False
     if not vlc_available or not ytdlp_available:
         music_status_text = "vlc/yt-dlp not available"
         return False
@@ -6379,22 +7548,57 @@ def _video_get_vlc_instance():
 def _video_ensure_window_sync(timeout=5):
     """Runs from a background thread: hops to the Tk main thread to (re)create/show the movable
     video window, waits for it, then returns the native window id VLC should render into."""
-    if _gui_app is None: return None
-    ready = threading.Event()
-    result = {}
-    def _create():
-        try:
-            _gui_app.ensure_video_window()
-            result["winid"] = _gui_app.video_canvas.winfo_id()
-        except Exception as e:
-            result["error"] = e
-        ready.set()
-    try:
-        _gui_app.root.after(0, _create)
-    except Exception:
+    if _gui_app is None:
         return None
-    ready.wait(timeout)
-    return result.get("winid")
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            ready = threading.Event()
+            result = {}
+
+            def _create():
+                try:
+                    _gui_app.ensure_video_window()
+                    if getattr(_gui_app, "video_canvas", None) is not None:
+                        try:
+                            _gui_app.video_canvas.update_idletasks()
+                            _gui_app.video_canvas.update()
+                            _gui_app.root.update_idletasks()
+                            _gui_app.root.update()
+                        except Exception:
+                            pass
+                        try:
+                            winid = _gui_app.video_canvas.winfo_id()
+                            if winid:
+                                result["winid"] = winid
+                        except Exception as e:
+                            result["error"] = e
+                    else:
+                        result["error"] = RuntimeError("video_canvas not created")
+                except Exception as e:
+                    result["error"] = e
+                ready.set()
+
+            try:
+                _gui_app.root.after(0, _create)
+            except Exception:
+                return None
+
+            ready.wait(0.2)
+            winid = result.get("winid")
+            if winid:
+                return winid
+            if result.get("error"):
+                # Keep polling for a little longer; on Linux the window can become valid a few
+                # ticks after the Toplevel is created.
+                time.sleep(0.1)
+                continue
+        except Exception:
+            pass
+        time.sleep(0.1)
+
+    return None
 
 # ---- queue-based engine: resolves + plays one clip at a time, auto-advances on end ----
 video_queue = []          # list of source urls (watch page urls) for the current schedule item
@@ -6405,8 +7609,13 @@ video_queue_source_url = ""
 # ---- !vr video requests: queued and played at the NEXT scheduled video change, not immediately ----
 video_requests = []  # list of {"url": watch/playlist url, "is_playlist": bool, "raw": original text, "user": requester}
 
-def queue_video_request(raw, user=""):
+def queue_video_request(raw, user="", is_mod=False):
     """Queues a !vr request; it plays automatically the next time the video schedule advances."""
+    allowed, reason = media_request_allowed(user, kind="video", is_mod=is_mod)
+    if not allowed:
+        console_log("WARN", f"[YT Restricted] Blocked video request from {user}: {reason}")
+        notify("Video Request Blocked", reason, timeout=8)
+        return None
     risky, reason = ai_check_risk(raw, kind="video")
     if risky:
         console_log("WARN", f"[Gemini] Blocked video request from {user}: \"{raw}\" -- {reason}")
@@ -6414,6 +7623,8 @@ def queue_video_request(raw, user=""):
         return None
     url, is_playlist = _video_parse_request(raw)
     if not url: return None
+    if _enforce_blocked_media("video", url, source_label="video request"):
+        return None
     with video_lock:
         video_requests.append({"url": url, "is_playlist": is_playlist, "raw": raw, "user": user})
     return url, is_playlist
@@ -6522,6 +7733,10 @@ def _video_play_queue_current(watch_url, _attempt=1):
 def video_play_url(url, shuffle_loop=False):
     """Start playing a single clip, or (if shuffle_loop) a playlist url shuffled+looping."""
     global video_queue, video_queue_index, video_queue_is_playlist, video_queue_source_url, video_status_text
+    if not url:
+        return False
+    if _enforce_blocked_media("video", url, source_label="video queue"):
+        return False
     if not vlc_available or not ytdlp_available:
         video_status_text = "vlc/yt-dlp not available"
         return False
@@ -6570,6 +7785,30 @@ def video_set_volume(vol):
     try:
         if video_media_player is not None: video_media_player.audio_set_volume(video_config["volume"])
     except Exception: pass
+
+def _video_url_from_id(video_id: str):
+    vid = (video_id or "").strip()
+    if not vid:
+        return ""
+    if vid.startswith("http://") or vid.startswith("https://"):
+        return vid
+    if "youtube.com" in vid or "youtu.be" in vid:
+        return vid
+    return f"https://www.youtube.com/watch?v={vid}"
+
+
+def _video_panel_window_title():
+    try:
+        if _gui_app is not None and getattr(_gui_app, "video_toplevel", None) is not None:
+            win = _gui_app.video_toplevel
+            if win and win.winfo_exists():
+                title = win.title()
+                if title:
+                    return title
+    except Exception:
+        pass
+    return "Video Panel"
+
 
 def video_player_loop():
     """Advances through the schedule every `change_hours` hours, in order, looping.
@@ -7526,6 +8765,7 @@ class YouTubeChatBot:
                                 is_owner=is_owner,
                                 is_command=_is_cmd,
                                 is_banned=_is_banned_,
+                                is_mod=is_mod,
                             )
                         except Exception:
                             pass
@@ -7580,6 +8820,10 @@ class YouTubeChatBot:
                                     target=execute_custom_command,
                                     args=(trigger,), daemon=True
                                 ).start()
+                                continue
+
+                            # ── Per-OS Host Switching commands (e.g. !winwin11, !macmonterey) ──
+                            if try_handle_host_switch_command(cmd):
                                 continue
 
                             # ── OS voting commands (e.g. !win7, !win10) ──
@@ -7680,7 +8924,7 @@ class YouTubeChatBot:
                             # ── Music / Video / Soundboard commands (transferred from chatuses.py) ──
                             elif cmd in ('play', 'music', 'songrequest', 'sr'):
                                 if args.strip():
-                                    threading.Thread(target=queue_song_request, args=(args, user), daemon=True).start()
+                                    threading.Thread(target=queue_song_request, args=(args, user), kwargs={"is_mod": is_mod}, daemon=True).start()
                                 else:
                                     threading.Thread(target=start_music_player, daemon=True).start()
                             elif cmd in ('musicskip', 'skipsong', 'skipmusic'):
@@ -7694,7 +8938,7 @@ class YouTubeChatBot:
                                 except Exception: pass
                             elif cmd in ('video', 'videorequest', 'vr'):
                                 if args.strip():
-                                    threading.Thread(target=queue_video_request, args=(args, user), daemon=True).start()
+                                    threading.Thread(target=queue_video_request, args=(args, user), kwargs={"is_mod": is_mod}, daemon=True).start()
                                 else:
                                     threading.Thread(target=start_video_player, daemon=True).start()
                             elif cmd in ('videoskip', 'skipvideo', 'vskip'):
@@ -7727,10 +8971,10 @@ class YouTubeChatBot:
                                                   daemon=True).start()
                             elif cmd in ('findsr',):
                                 if args.strip():
-                                    def _findsr(q=args, u=user):
+                                    def _findsr(q=args, u=user, m=is_mod):
                                         vid = find_youtube_video_id(q)
                                         if vid:
-                                            queue_song_request(vid, u)
+                                            queue_song_request(vid, u, is_mod=m)
                                         else:
                                             console_log("INFO", f"[findsr] no result for '{q}'")
                                     threading.Thread(target=_findsr, daemon=True).start()
@@ -7754,10 +8998,10 @@ class YouTubeChatBot:
                                     post_system_message(f"[clearsr] {user}: moderator only.")
                             elif cmd in ('findvr',):
                                 if args.strip():
-                                    def _findvr(q=args, u=user):
+                                    def _findvr(q=args, u=user, m=is_mod):
                                         vid = find_youtube_video_id(q)
                                         if vid:
-                                            queue_video_request(vid, u)
+                                            queue_video_request(vid, u, is_mod=m)
                                         else:
                                             console_log("INFO", f"[findvr] no result for '{q}'")
                                     threading.Thread(target=_findvr, daemon=True).start()
@@ -7779,6 +9023,18 @@ class YouTubeChatBot:
                                     post_system_message("[clearvr] pending video request queue cleared.")
                                 else:
                                     post_system_message(f"[clearvr] {user}: moderator only.")
+                            elif cmd in ('restrictmedia', 'restrictsrvr', 'restrictrequests', 'srvrmode'):
+                                if is_mod:
+                                    arg = (args.strip() or "toggle").lower()
+                                    if arg in ('on', 'enable', 'enabled', '1', 'true'):
+                                        set_media_request_restriction(True, note="[restrictmedia] restricted mode enabled — only moderators can queue !sr and !vr.")
+                                    elif arg in ('off', 'disable', 'disabled', '0', 'false'):
+                                        set_media_request_restriction(False, note="[restrictmedia] restricted mode disabled — !sr and !vr are open again.")
+                                    else:
+                                        set_media_request_restriction(not MEDIA_REQUEST_RESTRICTED,
+                                                                     note=f"[restrictmedia] restricted mode {'enabled' if not MEDIA_REQUEST_RESTRICTED else 'disabled'} — {'only moderators can queue !sr and !vr.' if not MEDIA_REQUEST_RESTRICTED else '!sr and !vr are open again.'}")
+                                else:
+                                    post_system_message(f"[restrictmedia] {user}: moderator only.")
                             # ── Voice ──
                             elif cmd == 'tts':
                                 speak_text(args)
@@ -8319,7 +9575,7 @@ class YouTubeChatBotSecondary:
                                 post_system_message(f"[coinflip] {random.choice(['heads', 'tails'])}")
                             elif cmd in ('play', 'music', 'songrequest', 'sr'):
                                 if args.strip():
-                                    threading.Thread(target=queue_song_request, args=(args, user), daemon=True).start()
+                                    threading.Thread(target=queue_song_request, args=(args, user), kwargs={"is_mod": is_mod}, daemon=True).start()
                                 else:
                                     threading.Thread(target=start_music_player, daemon=True).start()
                             elif cmd in ('musicskip', 'skipsong', 'skipmusic'):
@@ -8328,7 +9584,7 @@ class YouTubeChatBotSecondary:
                                 threading.Thread(target=music_stop_current, daemon=True).start()
                             elif cmd in ('video', 'videorequest', 'vr'):
                                 if args.strip():
-                                    threading.Thread(target=queue_video_request, args=(args, user), daemon=True).start()
+                                    threading.Thread(target=queue_video_request, args=(args, user), kwargs={"is_mod": is_mod}, daemon=True).start()
                                 else:
                                     threading.Thread(target=start_video_player, daemon=True).start()
                             elif cmd in ('videoskip', 'skipvideo', 'vskip'):
@@ -8392,6 +9648,7 @@ class ConsoleRedirect:
     def write(self, msg):
         self._orig_stdout.write(msg)
         self._mirror_to_overlay(msg)
+        enqueue_log_line_for_yt_relay(msg)
         # Schedule the widget update on the main thread (Tkinter is not thread-safe).
         # Guard against the widget being destroyed after the bot stops.
         # Skip bare newline messages — they are the second call that Python's print()
@@ -8459,6 +9716,7 @@ class UltraBotGUI:
     CONSOLE  = "#0a0a14"
     CONTEXT  = "#00e676"
     BORDER   = "#2d2d50"
+    SHIELD_BLUE = "#2aa6ff"
     _FONT_SIZE = 10
 
     def __init__(self, root):
@@ -8515,6 +9773,8 @@ class UltraBotGUI:
         load_video_config()
         load_soundboard_config()
         load_fun_high_scores()
+        load_mrtristinai_config()
+        start_config_autosave(0.1)
         self._build_ui()
         self._setup_konami_code_listener()
         load_custom_commands()
@@ -8527,7 +9787,7 @@ class UltraBotGUI:
         # anything or click Start Bot first.
         global current_vm_backend, VMX_PATH, current_os_vm
         (saved_backend, saved_vm, saved_watchdog, saved_test_mode,
-         saved_osv_vm, saved_osv_backend,
+         saved_save_backend, saved_osv_vm, saved_osv_backend,
          _saved_ai_safety_enabled, _saved_ai_safety_provider,
          _saved_music_playback_enabled, _saved_video_playback_enabled) = load_autostart_everything_config()
         # _saved_ai_safety_enabled/_saved_ai_safety_provider/_saved_music_playback_enabled/
@@ -8545,6 +9805,29 @@ class UltraBotGUI:
                 current_os_vm = saved_vm
             self._log(f"[AutostartEverything] Restored: backend={saved_backend}, "
                       f"vm={saved_vm or '(none)'}, watchdog={saved_watchdog}, test_mode={saved_test_mode}")
+
+        # Restore the user's preference whether to persist backend changes
+        try:
+            if hasattr(self, "_save_backend_var"):
+                self._save_backend_var.set(bool(saved_save_backend))
+        except Exception:
+            pass
+
+        # Track last-polled selections and start polling loop to autosave backend+VM
+        try:
+            self._last_polled_backend = saved_backend
+            self._last_polled_vm = saved_vm
+            self.root.after(1000, self._poll_backend_vm_changes)
+            self.root.after(5000, self._periodic_backend_vm_autosave)
+        except Exception:
+            pass
+
+        # Debug hook: show a sample moderator message on startup when requested
+        try:
+            if os.environ.get("ULTRABOT_SHOW_TEST_MOD") in ("1", "true", "True"):
+                self.root.after(800, lambda: self._append_chat("mrtristin-two", "is mod", is_mod=True))
+        except Exception:
+            pass
 
         # If OS Voting is enabled and there's a saved last-active OS Voting VM, restore
         # IT (and its own backend, together) as the higher-priority source of truth --
@@ -8762,6 +10045,7 @@ class UltraBotGUI:
         tab17_outer, tab17 = self._make_scrollable_tab(nb)
         tab18_outer, tab18 = self._make_scrollable_tab(nb)
         tab19_outer, tab19 = self._make_scrollable_tab(nb)
+        tab20 = ttk.Frame(nb)   # MrTristinAI chat already has its own internal ScrolledText
         nb.add(tab1_outer,  text="▶ Main")
         nb.add(tab2_outer,  text="⚙ Cmds")
         nb.add(tab3_outer,  text="🖥 VM")
@@ -8781,6 +10065,7 @@ class UltraBotGUI:
         nb.add(tab17_outer, text="🎬 Video")
         nb.add(tab18_outer, text="🔉 Soundboard")
         nb.add(tab19_outer, text="🖧 VNC / Web")
+        nb.add(tab20, text="🤖 MrTristinAI")
 
         self.nb = nb   # kept for dynamic tab insertion (e.g. the hidden Fun tab easter egg)
         self._fun_tab_anchor = tab15_outer   # Fun tab is inserted right before this one
@@ -8805,6 +10090,7 @@ class UltraBotGUI:
         self._build_video_tab(tab17)
         self._build_soundboard_tab(tab18)
         self._build_vnc_web_tab(tab19)
+        self._build_mrtristinai_tab(tab20)
         self._sync_main_vm_lock()
         self._nb = nb   # store reference for unsaved-changes guard
         self._bind_context_menus()   # attach right-click menus to all Entry/Text widgets
@@ -8982,6 +10268,17 @@ class UltraBotGUI:
             rb.pack(side="left", padx=(0,12))
             self._backend_radios.append(rb)
 
+        # Option: whether to persist backend selection into autostart config
+        self._save_backend_var = tk.BooleanVar(value=True)
+        save_backend_cb = ttk.Checkbutton(card, text="Save backend for next relaunch",
+                                          variable=self._save_backend_var,
+                                          command=lambda: save_autostart_everything_config(
+                                              backend=current_vm_backend,
+                                              vm=(self._vm_var.get().strip() if hasattr(self, "_vm_var") else ""),
+                                              save_backend=self._save_backend_var.get(),
+                                          ))
+        save_backend_cb.grid(row=1, column=2, sticky="w", padx=(4,0))
+
         # VM selector
         self._vm_field_label = tk.Label(card, text="VMware .vmx Path", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold"))
@@ -8991,7 +10288,11 @@ class UltraBotGUI:
                                       state="readonly", width=30,
                                       font=("Segoe UI",10))
         self._vm_combo.bind("<<ComboboxSelected>>",
-                             lambda e: save_autostart_everything_config(backend=current_vm_backend, vm=self._vm_var.get().strip()))
+                     lambda e: save_autostart_everything_config(
+                         backend=current_vm_backend,
+                         vm=self._vm_var.get().strip(),
+                         save_backend=self._save_backend_var.get() if hasattr(self, "_save_backend_var") else True,
+                     ))
         self._vm_combo.grid(row=2, column=1, sticky="ew", padx=(0,12),
                             pady=(10,0), ipady=3)
         ttk.Button(card, text="🔄 Refresh", style="Dim.TButton",
@@ -9003,8 +10304,10 @@ class UltraBotGUI:
 
         # Register a new .vmx (vmrun has no "list all VMs" command, so VMs are
         # registered locally in vms.json — alias is just a friendly label).
+        # Keep this row separate from the Host Switch Sync row below; both were
+        # previously placed on row=5 and visually overlapped in the Main tab.
         reg_row = tk.Frame(card, bg=self.BG2)
-        reg_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(22, 0))
+        reg_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(22, 0))
         tk.Label(reg_row, text="Register VM — Alias:", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 8)).pack(side="left")
         self._reg_alias_var = tk.StringVar()
@@ -9036,6 +10339,21 @@ class UltraBotGUI:
             activeforeground=self.TEXT, font=("Segoe UI", 9),
             command=self._on_auto_start_toggle)
         auto_chk.grid(row=4, column=1, columnspan=2, sticky="w", pady=(10,0))
+
+        # Push this machine's VM name to the other Per-OS Host Switching machine
+        # (see the "Per-OS Host Switching (EXPERIMENTAL)" panel on the OS Voting tab)
+        # whenever the watchdog restarts it, so both sides agree on the current VM.
+        tk.Label(card, text="Host Switch Sync", bg=self.BG2,
+                 fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
+                 row=5, column=0, sticky="w", padx=(0,8), pady=(6,0))
+        self._sync_vm_name_var = tk.BooleanVar(value=HOST_SWITCH_CONFIG.get("sync_vm_name", False))
+        sync_vm_chk = tk.Checkbutton(card,
+            text="Sync this VM name to the other Host-Switch Receiver/Sender",
+            variable=self._sync_vm_name_var, bg=self.BG2, fg=self.TEXT,
+            selectcolor=self.BG3, activebackground=self.BG2,
+            activeforeground=self.TEXT, font=("Segoe UI", 9),
+            command=self._on_sync_vm_name_toggle)
+        sync_vm_chk.grid(row=5, column=1, columnspan=2, sticky="w", pady=(6,0))
 
         card.columnconfigure(1, weight=1)
 
@@ -9140,10 +10458,35 @@ class UltraBotGUI:
         self._chat_viewer.tag_configure("command", foreground=self.GREEN,   font=("Segoe UI", 9, "bold"))
         self._chat_viewer.tag_configure("vip",     foreground=self.ACCENT,  font=("Segoe UI", 9, "bold"))
         self._chat_viewer.tag_configure("banned",  foreground=self.RED,     font=("Segoe UI", 9, "italic"))
+        self._chat_viewer.tag_configure("mod",     foreground=self.SHIELD_BLUE, font=("Segoe UI", 9, "bold"))
         self._chat_viewer.tag_configure("normal",  foreground=self.TEXT,    font=("Segoe UI", 9))
         self._chat_viewer.tag_configure("user",    foreground=self.TEXTDIM, font=("Segoe UI", 9, "bold"))
         self._chat_viewer.tag_configure("ts",      foreground=self.TEXTDIM, font=("Segoe UI", 8))
         self._chat_viewer.tag_configure("system",  foreground=self.ACCENT2, font=("Segoe UI", 8, "italic"))
+
+        # Create a small blue shield image for moderator usernames.
+        try:
+            w = 12; h = 12
+            img = tk.PhotoImage(width=w, height=h)
+            bg = self.BG3
+            blue = self.SHIELD_BLUE
+            cx, cy, r = w//2, h//2 - 1, 5
+            rows = []
+            for y in range(h):
+                row = []
+                for x in range(w):
+                    dx = x - cx
+                    dy = y - cy
+                    if dx*dx + dy*dy <= r*r:
+                        row.append(blue)
+                    else:
+                        row.append(bg)
+                rows.append("{" + " ".join(row) + "}")
+            # PhotoImage.put accepts a string of rows in Tcl list form
+            img.put(" ".join(rows))
+            self._mod_shield_img = img
+        except Exception:
+            self._mod_shield_img = None
 
         # Auto-scroll toggle
         self._chat_autoscroll = tk.BooleanVar(value=True)
@@ -9187,7 +10530,7 @@ class UltraBotGUI:
             pass
 
     def _append_chat(self, user: str, msg: str, is_owner: bool = False,
-                     is_command: bool = False, is_banned: bool = False):
+                     is_command: bool = False, is_banned: bool = False, is_mod: bool = False):
         """Append a chat message to the Live Chat Viewer widget (thread-safe)."""
         def _do():
             try:
@@ -9198,6 +10541,18 @@ class UltraBotGUI:
                     self._chat_viewer.insert("end", f"{user}", "banned")
                 elif is_owner:
                     self._chat_viewer.insert("end", f"★{user}", "owner")
+                elif is_mod:
+                    # Moderator: insert a small blue shield image (if available),
+                    # then the username highlighted with the mod tag.
+                    try:
+                        if getattr(self, "_mod_shield_img", None) is not None:
+                            self._chat_viewer.image_create("end", image=self._mod_shield_img)
+                            self._chat_viewer.insert("end", " ")
+                            self._chat_viewer.insert("end", f"{user}", "mod")
+                        else:
+                            self._chat_viewer.insert("end", f"🛡️{user}", "mod")
+                    except Exception:
+                        self._chat_viewer.insert("end", f"🛡️{user}", "mod")
                 elif user in vip_users:
                     self._chat_viewer.insert("end", f"♦{user}", "vip")
                 else:
@@ -9570,6 +10925,9 @@ class UltraBotGUI:
         tk.Label(col_hdr, text="VM (backend-specific)", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 9, "bold"), width=24, anchor="w").grid(row=0, column=4, padx=4)
 
+        tk.Label(col_hdr, text="OS Host",      bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold"), width=9, anchor="w").grid(row=0, column=5, padx=4)
+
         # Canvas + scrollbar for the rows
         scroll_container = tk.Frame(self._os_rows_card, bg=self.BG2)
         scroll_container.pack(fill="both", expand=True)
@@ -9601,6 +10959,7 @@ class UltraBotGUI:
         self._os_vm_vars      = []
         self._os_vm_combos    = []
         self._os_backend_vars = []
+        self._os_host_vars    = []
         self._os_voting_rows_frame = inner
         self._os_voting_wheel_fn   = _on_mousewheel
 
@@ -9618,11 +10977,120 @@ class UltraBotGUI:
         ttk.Button(btn_row, text="＋ Add VM", style="Dim.TButton",
                    command=self._add_os_voting_row_blank).pack(side="left")
 
+        # ── Per-OS Host Switching (EXPERIMENTAL) ──
+        hs_hdr = tk.Frame(parent, bg=self.BG)
+        hs_hdr.pack(fill="x", padx=16, pady=(18, 6))
+        tk.Label(hs_hdr, text="🌐  Per-OS Host Switching (EXPERIMENTAL)",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(hs_hdr,
+                 text=("If you have macOS, Windows, and Linux, you can do Per-OS host "
+                       "switching between VM software with commands. Helpful if you're on "
+                       "Linux and don't have Hyper-V -- a Windows 10/11 desktop/laptop/VPS "
+                       "with Hyper-V can run it for you with a command like !winhypervwin11. "
+                       "On this computer: it switches the OBS scene, stops the OBS stream "
+                       "via websocket, stops the bot, and saves the current VM -- then on "
+                       "the other computer it starts the VM assigned in current_vm.json and "
+                       "starts the bot. This machine defaults to Sender; if it detects a "
+                       "Sender already running elsewhere at startup, it defaults to Receiver."),
+                 bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 9),
+                 wraplength=760, justify="left").pack(anchor="w", pady=(2, 0))
+
+        hs_card = ttk.Frame(parent, style="Card.TFrame", padding=20)
+        hs_card.pack(fill="x", padx=16, pady=(8, 8))
+
+        def _hs_row(label_text, widget_factory):
+            row = tk.Frame(hs_card, bg=self.BG2)
+            row.pack(anchor="w", pady=(4, 0), fill="x")
+            tk.Label(row, text=label_text, bg=self.BG2, fg=self.TEXT,
+                     font=("Segoe UI", 9), width=16, anchor="w").pack(side="left", padx=(0, 8))
+            return widget_factory(row)
+
+        self._hs_role_var = tk.StringVar(value=HOST_SWITCH_CONFIG.get("role", "Sender"))
+        def _mk_role(row):
+            c = ttk.Combobox(row, textvariable=self._hs_role_var, width=12, state="readonly",
+                              values=["Sender", "Receiver"], font=("Segoe UI", 9))
+            c.pack(side="left")
+            return c
+        _hs_row("Server type?:", _mk_role)
+
+        self._hs_obs_ws_var = tk.StringVar(value=HOST_SWITCH_CONFIG.get("obs_ws_address", ""))
+        def _mk_ws(row):
+            e = ttk.Entry(row, textvariable=self._hs_obs_ws_var, width=34, font=("Segoe UI Mono", 9))
+            e.pack(side="left")
+            return e
+        _hs_row("OBS WS Address:", _mk_ws)
+
+        self._hs_scene_var = tk.StringVar(value=HOST_SWITCH_CONFIG.get("switching_scene", ""))
+        def _mk_scene(row):
+            e = ttk.Entry(row, textvariable=self._hs_scene_var, width=34, font=("Segoe UI", 9))
+            e.pack(side="left")
+            return e
+        _hs_row("Switching Scene:", _mk_scene)
+
+        self._hs_migration_var = tk.StringVar(value=HOST_SWITCH_CONFIG.get("migration_software", "None"))
+        def _mk_migration(row):
+            c = ttk.Combobox(row, textvariable=self._hs_migration_var, width=18, state="readonly",
+                              values=["None", "Hyper-V", "UTM", "Parallels Desktop"],
+                              font=("Segoe UI", 9))
+            c.pack(side="left")
+            return c
+        _hs_row("Migration Software:", _mk_migration)
+
+        self._hs_port_var = tk.StringVar(value=str(HOST_SWITCH_CONFIG.get("local_port", 8765)))
+        def _mk_port(row):
+            e = ttk.Entry(row, textvariable=self._hs_port_var, width=10, font=("Segoe UI Mono", 9))
+            e.pack(side="left")
+            return e
+        _hs_row("Local Port:", _mk_port)
+
+        tk.Label(hs_card,
+                 text=(f"Sender URL: {HOST_SWITCH_SENDER_URL}   |   Receiver URL: {HOST_SWITCH_RECEIVER_URL}\n"
+                       f"Tunnel this machine's local port with localtunnel, matching whichever "
+                       f"role you pick above."),
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 7, "italic"),
+                 justify="left").pack(anchor="w", pady=(10, 2))
+
+        hs_btn_row = tk.Frame(hs_card, bg=self.BG2)
+        hs_btn_row.pack(anchor="w", pady=(10, 0))
+        ttk.Button(hs_btn_row, text="🔌 Test Connection Now",
+                   command=self._hs_test_connection).pack(side="left", padx=(0, 8))
+        ttk.Button(hs_btn_row, text="💾 Save Host Switching",
+                   command=self._save_host_switch_config).pack(side="left")
+
+        self._hs_status = tk.Label(hs_card, text="", bg=self.BG2, fg=self.GREEN, font=("Segoe UI", 9))
+        self._hs_status.pack(anchor="w", pady=(8, 0))
+
         self._refresh_os_vm_lists()
         self._set_os_rows_enabled(OS_VOTING_ENABLED)
         # Track unsaved changes (tab index 3)
         self._trace_dirty(3, self._os_voting_var,
-                          *self._os_name_vars, *self._os_trigger_vars, *self._os_vm_vars)
+                          *self._os_name_vars, *self._os_trigger_vars, *self._os_vm_vars,
+                          *self._os_host_vars, self._hs_role_var, self._hs_obs_ws_var,
+                          self._hs_scene_var, self._hs_migration_var, self._hs_port_var)
+
+    def _hs_test_connection(self):
+        threading.Thread(target=host_switch_test_connection_and_handshake, daemon=True).start()
+        other_role = "Receiver" if self._hs_role_var.get() == "Sender" else "Sender"
+        self._hs_status.configure(text=f"Testing connection to the {other_role}... check the log.",
+                                   fg=self.ACCENT)
+
+    def _save_host_switch_config(self):
+        HOST_SWITCH_CONFIG["role"] = self._hs_role_var.get()
+        HOST_SWITCH_CONFIG["obs_ws_address"] = self._hs_obs_ws_var.get().strip()
+        HOST_SWITCH_CONFIG["switching_scene"] = self._hs_scene_var.get().strip()
+        HOST_SWITCH_CONFIG["migration_software"] = self._hs_migration_var.get()
+        try:
+            HOST_SWITCH_CONFIG["local_port"] = int(self._hs_port_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Invalid Port", "Local Port must be a number.")
+            return
+        save_host_switch_config()
+        if _host_switch_server is None:
+            start_host_switch_server()
+        self._hs_status.configure(text="Host switching config saved.", fg=self.GREEN)
+        self._log(f"[HostSwitch] Saved. role={HOST_SWITCH_CONFIG['role']}, "
+                   f"migration={HOST_SWITCH_CONFIG['migration_software']}")
 
     def _add_os_voting_row(self, entry=None):
         """Builds one OS-voting row (index label, name, trigger, VM dropdown) and
@@ -9677,13 +11145,22 @@ class UltraBotGUI:
 
         self._os_vm_vars.append(vm_var)
         self._os_vm_combos.append(vm_combo)
-        return name_var, trig_var, vm_var, backend_var
+
+        host_var = tk.StringVar(value=entry.get("os_host", "Current"))
+        host_combo = ttk.Combobox(row, textvariable=host_var, width=9, state="readonly",
+                                   values=["Current", "macOS", "Windows", "Linux"],
+                                   font=("Segoe UI", 9))
+        host_combo.grid(row=0, column=5, padx=4, ipady=3)
+        host_combo.bind("<MouseWheel>", self._os_voting_wheel_fn)
+        self._os_host_vars.append(host_var)
+
+        return name_var, trig_var, vm_var, backend_var, host_var
 
     def _add_os_voting_row_blank(self):
         """+ Add VM button: adds a brand-new blank lane, exactly like the rows already
         built above -- not a value merged into the existing dropdowns."""
-        name_var, trig_var, vm_var, backend_var = self._add_os_voting_row()
-        self._trace_dirty(3, name_var, trig_var, vm_var, backend_var)
+        name_var, trig_var, vm_var, backend_var, host_var = self._add_os_voting_row()
+        self._trace_dirty(3, name_var, trig_var, vm_var, backend_var, host_var)
         self._mark_dirty(3)
         self._log("[OSVoting] Added a new VM row.")
 
@@ -9827,13 +11304,42 @@ class UltraBotGUI:
                    command=self._reset_appearance).pack(side="left")
 
     def _apply_preset(self, name):
+        # Apply preset safely: if the new theme makes the UI unreadable,
+        # revert to the previous theme to avoid an empty/blank UI.
         colors = THEMES.get(name, {})
+        # Save previous values to allow rollback
+        prev = {k: getattr(self.__class__, k) for k in ["BG","BG2","BG3","ACCENT","ACCENT2","TEXT","TEXTDIM","CONSOLE","BORDER"]}
         for key, val in colors.items():
             setattr(self.__class__, key, val)
             if hasattr(self, '_color_vars') and key in self._color_vars:
                 self._color_vars[key].set(val)
+        # Rebuild UI with the new theme
         self._full_ui_rebuild()
-        self._log(f"[Appearance] Applied preset: {name}")
+
+        # Post-check: ensure title label foreground contrasts with background.
+        def _verify_or_revert():
+            try:
+                if hasattr(self, '_title_label'):
+                    fg = self._title_label.cget('fg')
+                    bg = self._title_label.cget('bg')
+                    # If fg equals bg (or is very similar), consider it broken and revert.
+                    if not fg or not bg or fg.lower() == bg.lower():
+                        raise Exception('fg==bg')
+            except Exception:
+                # Revert to previous colors
+                for k, v in prev.items():
+                    setattr(self.__class__, k, v)
+                    if hasattr(self, '_color_vars') and k in self._color_vars:
+                        self._color_vars[k].set(v)
+                self._full_ui_rebuild()
+                self._log(f"[Appearance] Applied preset: {name} resulted in unreadable UI; reverted.")
+                return
+            self._log(f"[Appearance] Applied preset: {name}")
+
+        try:
+            self.root.after(150, _verify_or_revert)
+        except Exception:
+            _verify_or_revert()
 
     def _pick_color(self, key):
         from tkinter import colorchooser
@@ -10118,7 +11624,9 @@ class UltraBotGUI:
         tk.Label(os_scene_card,
                  text="When OS voting switches to a specific OS, OBS switches to that OS's scene.\n"
                       "Chat Trigger must match the trigger set in the OS Voting tab (e.g. win7, win10).\n"
-                      "Switching Scene (optional) shows while THAT OS is booting, before its own scene takes over.",
+                      "Switching Scene (optional) shows while THAT OS is booting, before its own scene takes over.\n"
+                      "Receiver Scene (optional) is used instead of Switching Scene, but only on the machine "
+                      "that RECEIVES a Per-OS Host Switching handoff for that OS.",
                  bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 8), justify="left").pack(anchor="w", pady=(0, 8))
 
@@ -10132,6 +11640,8 @@ class UltraBotGUI:
         tk.Label(hdr, text="OBS Scene Name", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 8, "bold"), width=24, anchor="w").pack(side="left", padx=(0, 8))
         tk.Label(hdr, text="Switching Scene", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8, "bold"), width=24, anchor="w").pack(side="left", padx=(0, 8))
+        tk.Label(hdr, text="Receiver Scene", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 8, "bold"), width=24, anchor="w").pack(side="left")
 
         self._obs_os_rows = []
@@ -10142,19 +11652,22 @@ class UltraBotGUI:
 
         saved_os_scenes = OBS_CONFIG.get("os_scenes", {})
         saved_switching_scenes = OBS_CONFIG.get("switching_scenes", {})
+        saved_recv_switching_scenes = OBS_CONFIG.get("recv_switching_scenes", {})
         prefill = []
         for entry in OS_LIST:
             t = (entry.get("trigger") or "").strip().lower().lstrip("!")
             n = entry.get("name", "")
             if t:
-                prefill.append((n, t, saved_os_scenes.get(t, ""), saved_switching_scenes.get(t, "")))
+                prefill.append((n, t, saved_os_scenes.get(t, ""), saved_switching_scenes.get(t, ""),
+                                 saved_recv_switching_scenes.get(t, "")))
         for trig, scene in saved_os_scenes.items():
             if not any(p[1] == trig for p in prefill):
-                prefill.append(("", trig, scene, saved_switching_scenes.get(trig, "")))
+                prefill.append(("", trig, scene, saved_switching_scenes.get(trig, ""),
+                                 saved_recv_switching_scenes.get(trig, "")))
         while len(prefill) < 5:
-            prefill.append(("", "", "", ""))
-        for name, trig, scene, sw_scene in prefill:
-            self._add_obs_os_row(name, trig, scene, sw_scene)
+            prefill.append(("", "", "", "", ""))
+        for name, trig, scene, sw_scene, recv_scene in prefill:
+            self._add_obs_os_row(name, trig, scene, sw_scene, recv_scene)
 
         ttk.Button(os_scene_card, text="+ Add Row", style="Dim.TButton",
                    command=lambda: self._add_obs_os_row()).pack(anchor="w", pady=(8, 0))
@@ -10208,7 +11721,7 @@ class UltraBotGUI:
                    )).pack(side="left", padx=(6, 0))
         self._obs_trigger_rows.append(entry_pair)
 
-    def _add_obs_os_row(self, name="", trigger="", scene="", switching_scene=""):
+    def _add_obs_os_row(self, name="", trigger="", scene="", switching_scene="", recv_switching_scene=""):
         row = tk.Frame(self._obs_os_rows_frame, bg=self.BG2)
         row.pack(fill="x", pady=2)
         if hasattr(self, '_obs_wheel_fn'):
@@ -10217,6 +11730,7 @@ class UltraBotGUI:
         trig_var  = tk.StringVar(value=trigger)
         scene_var = tk.StringVar(value=scene)
         sw_var    = tk.StringVar(value=switching_scene)
+        recv_var  = tk.StringVar(value=recv_switching_scene)
         ttk.Entry(row, textvariable=name_var,  width=18,
                   font=("Segoe UI", 9)).pack(side="left", padx=(0, 8), ipady=2)
         ttk.Entry(row, textvariable=trig_var,  width=14,
@@ -10224,13 +11738,15 @@ class UltraBotGUI:
         ttk.Entry(row, textvariable=scene_var, width=24,
                   font=("Segoe UI", 9)).pack(side="left", padx=(0, 8), ipady=2)
         ttk.Entry(row, textvariable=sw_var, width=24,
+                  font=("Segoe UI", 9)).pack(side="left", padx=(0, 8), ipady=2)
+        ttk.Entry(row, textvariable=recv_var, width=24,
                   font=("Segoe UI", 9)).pack(side="left", ipady=2)
         ttk.Button(row, text="✕", style="Dim.TButton", width=2,
-                   command=lambda r=row, t=(name_var, trig_var, scene_var, sw_var): (
+                   command=lambda r=row, t=(name_var, trig_var, scene_var, sw_var, recv_var): (
                        r.destroy(),
                        self._obs_os_rows.remove(t) if t in self._obs_os_rows else None
                    )).pack(side="left", padx=(6, 0))
-        self._obs_os_rows.append((name_var, trig_var, scene_var, sw_var))
+        self._obs_os_rows.append((name_var, trig_var, scene_var, sw_var, recv_var))
 
     def _obs_connect(self):
         OBS_CONFIG["host"]     = self._obs_host_var.get().strip()
@@ -10267,19 +11783,24 @@ class UltraBotGUI:
             if key and scene:
                 triggers[key] = scene
         OBS_CONFIG["triggers"] = triggers
-        # Save per-OS scenes (and each row's own switching scene)
+        # Save per-OS scenes (and each row's own switching / receiver-switching scene)
         os_scenes = {}
         switching_scenes = {}
-        for name_var, trig_var, scene_var, sw_var in self._obs_os_rows:
+        recv_switching_scenes = {}
+        for name_var, trig_var, scene_var, sw_var, recv_var in self._obs_os_rows:
             trig  = trig_var.get().strip().lower().lstrip("!")
             scene = scene_var.get().strip()
             sw_scene = sw_var.get().strip()
+            recv_scene = recv_var.get().strip()
             if trig and scene:
                 os_scenes[trig] = scene
             if trig and sw_scene:
                 switching_scenes[trig] = sw_scene
+            if trig and recv_scene:
+                recv_switching_scenes[trig] = recv_scene
         OBS_CONFIG["os_scenes"] = os_scenes
         OBS_CONFIG["switching_scenes"] = switching_scenes
+        OBS_CONFIG["recv_switching_scenes"] = recv_switching_scenes
         save_obs_config()
         self._clear_dirty(5)
         messagebox.showinfo("Saved", "OBS settings saved.")
@@ -10290,6 +11811,12 @@ class UltraBotGUI:
         save_auto_start_config()
         save_autostart_everything_config(watchdog=AUTO_START_ENABLED)
         self._log(f"[AutoStart] Watchdog {'enabled' if AUTO_START_ENABLED else 'disabled'} by user.")
+
+    def _on_sync_vm_name_toggle(self):
+        HOST_SWITCH_CONFIG["sync_vm_name"] = self._sync_vm_name_var.get()
+        save_host_switch_config()
+        self._log(f"[HostSwitch] Sync VM name to other host "
+                   f"{'enabled' if HOST_SWITCH_CONFIG['sync_vm_name'] else 'disabled'} by user.")
 
     def _sync_main_vm_lock(self):
         """Lock the Main tab VM selector AND Backend radio buttons when OS Voting is
@@ -10321,8 +11848,9 @@ class UltraBotGUI:
             trig = self._os_trigger_vars[i].get().strip().lower().lstrip("!")
             vm   = self._os_vm_vars[i].get().strip()
             backend = self._os_backend_vars[i].get().strip() or "vmware"
+            os_host = self._os_host_vars[i].get().strip() or "Current" if i < len(self._os_host_vars) else "Current"
             if name or trig or vm:
-                new_list.append({"name": name, "trigger": trig, "vm": vm, "backend": backend})
+                new_list.append({"name": name, "trigger": trig, "vm": vm, "backend": backend, "os_host": os_host})
 
         if enabled:
             valid = [e for e in new_list if e["name"] and e["trigger"] and e["vm"]]
@@ -10519,9 +12047,22 @@ class UltraBotGUI:
             self._vm_field_label.configure(text="VMware .vmx Path")
             vms = get_vm_list()
         self._vm_combo['values'] = vms
+        current_vm = self._vm_var.get().strip()
         if vms:
-            self._vm_combo.current(0)
-        save_autostart_everything_config(backend=current_vm_backend, vm=self._vm_var.get().strip())
+            if current_vm not in vms:
+                self._vm_var.set(vms[0])
+                current_vm = vms[0]
+            self._vm_combo.current(vms.index(current_vm))
+        else:
+            self._vm_var.set("")
+            current_vm = ""
+        # Respect the checkbox: only persist backend+vm if the user wants it saved.
+        save_backend_flag = self._save_backend_var.get() if hasattr(self, "_save_backend_var") else True
+        save_autostart_everything_config(
+            backend=current_vm_backend,
+            vm=current_vm,
+            save_backend=save_backend_flag,
+        )
 
     def _refresh_vm_list(self):
         backend = self._vm_backend_var.get() if hasattr(self, "_vm_backend_var") else "vmware"
@@ -10538,6 +12079,57 @@ class UltraBotGUI:
         else:
             self._log("⚠️ No VMs registered (add a .vmx path first)" if backend == "vmware"
                        else f"⚠️ No {backend} VMs found.")
+
+    def _poll_backend_vm_changes(self):
+        """Every 1s poll the backend and VM selection and persist if it changed."""
+        try:
+            backend = self._vm_backend_var.get() if hasattr(self, "_vm_backend_var") else globals().get("current_vm_backend")
+            vm = self._vm_var.get().strip() if hasattr(self, "_vm_var") else globals().get("VMX_PATH", "")
+            if not vm and hasattr(self, "_vm_combo") and self._vm_combo['values']:
+                try:
+                    vm = self._vm_combo.get().strip()
+                except Exception:
+                    vm = ""
+            last_b = getattr(self, "_last_polled_backend", None)
+            last_v = getattr(self, "_last_polled_vm", None)
+            if backend != last_b or vm != last_v:
+                # update last seen values and persist, but respect the checkbox state
+                self._last_polled_backend = backend
+                self._last_polled_vm = vm
+                save_backend_flag = self._save_backend_var.get() if hasattr(self, "_save_backend_var") else True
+                try:
+                    save_autostart_everything_config(backend=backend, vm=vm, save_backend=save_backend_flag)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            try:
+                self.root.after(1000, self._poll_backend_vm_changes)
+            except Exception:
+                pass
+
+    def _periodic_backend_vm_autosave(self):
+        """Unconditionally re-writes the current backend/VM/save_backend selection
+        to autostarteverything.json every 5 seconds, regardless of whether
+        _poll_backend_vm_changes already saw and saved the same change. This is a
+        flat-timer safety net on top of that change-triggered poll: it guarantees
+        the on-disk config is never more than 5 seconds stale even in a scenario
+        the change-detection logic doesn't catch (e.g. current_vm_backend/VMX_PATH
+        set directly by a non-GUI code path with the widgets never touched), so any
+        relaunch always resumes on the right backend."""
+        try:
+            backend = self._vm_backend_var.get() if hasattr(self, "_vm_backend_var") else globals().get("current_vm_backend", "vmware")
+            vm = self._vm_var.get().strip() if hasattr(self, "_vm_var") else globals().get("VMX_PATH", "")
+            save_backend_flag = self._save_backend_var.get() if hasattr(self, "_save_backend_var") else True
+            save_autostart_everything_config(backend=backend, vm=vm, save_backend=save_backend_flag)
+        except Exception:
+            pass
+        finally:
+            try:
+                self.root.after(5000, self._periodic_backend_vm_autosave)
+            except Exception:
+                pass
 
     def _add_vm_entry(self):
         alias = self._reg_alias_var.get().strip().lower()
@@ -11667,6 +13259,18 @@ class UltraBotGUI:
                         variable=self._gemini_enabled_var,
                         style="Toggle.TCheckbutton").pack(anchor="w")
 
+        self._media_restricted_var = tk.BooleanVar(value=bool(MEDIA_REQUEST_RESTRICTED))
+        def _on_media_restricted_toggle():
+            enabled = self._media_restricted_var.get()
+            set_media_request_restriction(enabled)
+            gemini_config["media_restricted"] = enabled
+
+        ttk.Checkbutton(gemini_card,
+                        text="YT restricted mode — only moderators can queue !sr and !vr; mod controls such as !skipsr / !skipvr / !clear* still work",
+                        variable=self._media_restricted_var,
+                        command=_on_media_restricted_toggle,
+                        style="Toggle.TCheckbutton").pack(anchor="w", pady=(10, 0))
+
         provider_row = tk.Frame(gemini_card, bg=self.BG2)
         provider_row.pack(anchor="w", pady=(12, 0), fill="x")
         tk.Label(provider_row, text="Provider:", bg=self.BG2, fg=self.TEXT,
@@ -11703,6 +13307,57 @@ class UltraBotGUI:
                  bg=self.BG2, fg=(self.TEXTDIM if groq_available else self.RED),
                  font=("Segoe UI", 7, "italic")).pack(anchor="w", pady=(4, 0))
 
+        # ── YT Chat Log Relay panel ──
+        relay_hdr = tk.Frame(parent, bg=self.BG)
+        relay_hdr.pack(fill="x", padx=16, pady=(18, 6))
+        tk.Label(relay_hdr, text="📡  YT Chat Log Relay",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(relay_hdr, text="Mirrors every line of this app's console log out to the YouTube Live Chat.",
+                 bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+
+        relay_card = ttk.Frame(parent, style="Card.TFrame", padding=20)
+        relay_card.pack(fill="x", padx=12, pady=(8, 0))
+
+        self._relay_enabled_var = tk.BooleanVar(value=YT_LOG_RELAY_CONFIG.get("enabled", False))
+        ttk.Checkbutton(relay_card, text="Enable relay (console log → YT chat)",
+                        variable=self._relay_enabled_var,
+                        style="Toggle.TCheckbutton").pack(anchor="w", pady=(0, 10))
+
+        def _relay_row(parent_frame, label_text, config_key, secret=False):
+            row = tk.Frame(parent_frame, bg=self.BG2)
+            row.pack(anchor="w", pady=(4, 0), fill="x")
+            tk.Label(row, text=label_text, bg=self.BG2, fg=self.TEXT,
+                     font=("Segoe UI", 9), width=16, anchor="w").pack(side="left", padx=(0, 8))
+            var = tk.StringVar(value=YT_LOG_RELAY_CONFIG.get(config_key, ""))
+            entry_kwargs = {"show": "•"} if secret else {}
+            ttk.Entry(row, textvariable=var, width=46,
+                      font=("Segoe UI Mono", 9), **entry_kwargs).pack(side="left")
+            return var
+
+        self._relay_client_id_var = _relay_row(relay_card, "Client ID:", "client_id")
+        self._relay_client_secret_var = _relay_row(relay_card, "Client Secret:", "client_secret", secret=True)
+        self._relay_live_chat_id_var = _relay_row(relay_card, "Live Chat ID:", "live_chat_id")
+
+        tk.Label(relay_card, text="One-time setup -- paste a fresh auth code below and click Exchange,"
+                                   " or paste an access/refresh token pair you already have.",
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 7, "italic")).pack(anchor="w", pady=(10, 2))
+
+        self._relay_auth_code_var = _relay_row(relay_card, "Auth Code:", "auth_code")
+        self._relay_access_token_var = _relay_row(relay_card, "Access Token:", "access_token", secret=True)
+        self._relay_refresh_token_var = _relay_row(relay_card, "Refresh Token:", "refresh_token", secret=True)
+
+        relay_btn_row = tk.Frame(relay_card, bg=self.BG2)
+        relay_btn_row.pack(anchor="w", pady=(12, 0))
+        ttk.Button(relay_btn_row, text="🔐 Exchange Auth Code",
+                   command=self._relay_exchange_auth_code).pack(side="left", padx=(0, 8))
+        ttk.Button(relay_btn_row, text="🔄 Refresh Token Now",
+                   command=self._relay_refresh_token).pack(side="left")
+
+        self._relay_status = tk.Label(relay_card, text="", bg=self.BG2, fg=self.GREEN,
+                                       font=("Segoe UI", 9))
+        self._relay_status.pack(anchor="w", pady=(8, 0))
+
         btn_row = tk.Frame(parent, bg=self.BG)
         btn_row.pack(fill="x", padx=12, pady=(16, 0))
         ttk.Button(btn_row, text="💾 Save Permissions", style="Green.TButton",
@@ -11717,11 +13372,57 @@ class UltraBotGUI:
         # Track unsaved changes (tab index 9)
         self._trace_dirty(9, *self._perm_vars.values(),
                           self._vote_pct_enabled_var, self._vote_pct_var, self._youtube_api_key_var,
-                          self._gemini_enabled_var, self._gemini_api_key_var,
-                          self._ai_provider_var, self._groq_api_key_var)
+                          self._gemini_enabled_var, self._media_restricted_var, self._gemini_api_key_var,
+                          self._ai_provider_var, self._groq_api_key_var,
+                          self._relay_enabled_var, self._relay_client_id_var, self._relay_client_secret_var,
+                          self._relay_live_chat_id_var, self._relay_auth_code_var,
+                          self._relay_access_token_var, self._relay_refresh_token_var)
+
+    def _relay_exchange_auth_code(self):
+        """Pulls the 3 fields from the panel, saves them, and exchanges the
+        auth code for a fresh access_token/refresh_token pair."""
+        YT_LOG_RELAY_CONFIG["client_id"] = self._relay_client_id_var.get().strip()
+        YT_LOG_RELAY_CONFIG["client_secret"] = self._relay_client_secret_var.get().strip()
+        YT_LOG_RELAY_CONFIG["live_chat_id"] = self._relay_live_chat_id_var.get().strip()
+        YT_LOG_RELAY_CONFIG["auth_code"] = self._relay_auth_code_var.get().strip()
+        ok = yt_relay_exchange_auth_code()
+        self._relay_access_token_var.set(YT_LOG_RELAY_CONFIG.get("access_token", ""))
+        self._relay_refresh_token_var.set(YT_LOG_RELAY_CONFIG.get("refresh_token", ""))
+        self._relay_auth_code_var.set("")
+        self._relay_status.configure(
+            text="Tokens obtained." if ok else "Exchange failed -- check the log.",
+            fg=self.GREEN if ok else self.RED)
+
+    def _relay_refresh_token(self):
+        """Uses whatever refresh_token is currently on the panel to mint a new
+        access_token, without needing a fresh auth code."""
+        YT_LOG_RELAY_CONFIG["client_id"] = self._relay_client_id_var.get().strip()
+        YT_LOG_RELAY_CONFIG["client_secret"] = self._relay_client_secret_var.get().strip()
+        YT_LOG_RELAY_CONFIG["refresh_token"] = self._relay_refresh_token_var.get().strip()
+        new_token = yt_relay_refresh_access_token()
+        if new_token:
+            self._relay_access_token_var.set(new_token)
+        self._relay_status.configure(
+            text="Access token refreshed." if new_token else "Refresh failed -- check the log.",
+            fg=self.GREEN if new_token else self.RED)
 
     def _save_permissions(self):
         global YOUTUBE_API_KEY
+        YT_LOG_RELAY_CONFIG["enabled"] = self._relay_enabled_var.get()
+        YT_LOG_RELAY_CONFIG["client_id"] = self._relay_client_id_var.get().strip()
+        YT_LOG_RELAY_CONFIG["client_secret"] = self._relay_client_secret_var.get().strip()
+        YT_LOG_RELAY_CONFIG["live_chat_id"] = self._relay_live_chat_id_var.get().strip()
+        YT_LOG_RELAY_CONFIG["access_token"] = self._relay_access_token_var.get().strip()
+        YT_LOG_RELAY_CONFIG["refresh_token"] = self._relay_refresh_token_var.get().strip()
+        if self._relay_auth_code_var.get().strip():
+            YT_LOG_RELAY_CONFIG["auth_code"] = self._relay_auth_code_var.get().strip()
+            yt_relay_exchange_auth_code()
+            self._relay_access_token_var.set(YT_LOG_RELAY_CONFIG.get("access_token", ""))
+            self._relay_refresh_token_var.set(YT_LOG_RELAY_CONFIG.get("refresh_token", ""))
+            self._relay_auth_code_var.set("")
+        save_yt_log_relay_config()
+        if YT_LOG_RELAY_CONFIG["enabled"]:
+            start_yt_log_relay_worker()
         for key, var in self._perm_vars.items():
             try:
                 val = int(var.get())
@@ -11747,6 +13448,8 @@ class UltraBotGUI:
         gemini_config["provider"] = self._ai_provider_var.get()
         gemini_config["gemini_api_key"] = new_gemini_key
         gemini_config["groq_api_key"] = new_groq_key
+        gemini_config["media_restricted"] = self._media_restricted_var.get()
+        set_media_request_restriction(gemini_config["media_restricted"])
         save_gemini_config()
         save_autostart_everything_config(ai_safety_enabled=gemini_config["enabled"],
                                           ai_safety_provider=gemini_config["provider"])
@@ -12703,63 +14406,64 @@ class UltraBotGUI:
             cb.configure(state=state, fg=fg)
 
     def _rpc_start(self):
-        # ── 3-step safety confirmation ──
-        # Warning 1
-        if not messagebox.askokcancel(
-            "⚠  Real PC Control — Warning 1 of 3",
-            "You are about to give YouTube CHAT viewers direct control\n"
-            "over THIS computer's keyboard and mouse.\n\n"
-            "Anyone watching your stream will be able to:\n"
-            "  • Type text into any open window\n"
-            "  • Click and move your mouse\n"
-            "  • Open programs, close windows, press key combos\n\n"
-            "Make sure you understand the risks before continuing.\n\n"
-            "Click OK to proceed to the next warning, or Cancel to abort.",
-            icon="warning"
-        ):
-            return
-
-        # Warning 2
-        if not messagebox.askokcancel(
-            "⚠  Real PC Control — Warning 2 of 3",
-            "SECURITY RISK — READ CAREFULLY:\n\n"
-            "• Viewers can type into password fields, browsers, terminals\n"
-            "• Viewers can close or crash applications on your PC\n"
-            "• Viewers can attempt to open Run dialogs, CMD, PowerShell\n"
-            "• There is NO undo — actions execute instantly on your machine\n\n"
-            "Recommended precautions:\n"
-            "  ✔  Use the Whitelist to restrict who can send commands\n"
-            "  ✔  Enable Failsafe (move mouse to top-left corner to stop)\n"
-            "  ✔  Close sensitive apps (browser, email, file manager) first\n"
-            "  ✔  Disable the Combo category if you don't want hotkeys used\n\n"
-            "Click OK to proceed to the final confirmation, or Cancel to abort.",
-            icon="warning"
-        ):
-            return
-
-        # Warning 3 — final "I accept responsibility" confirmation
-        if not messagebox.askokcancel(
-            "⚠  Real PC Control — Warning 3 of 3  (Final)",
-            "FINAL CONFIRMATION:\n\n"
-            "By clicking OK you confirm that:\n\n"
-            "  • You take FULL responsibility for any actions\n"
-            "    performed on this computer through chat commands.\n\n"
-            "  • The developer (Nexovative) is NOT responsible\n"
-            "    for any damage, data loss, privacy breach, or\n"
-            "    unintended consequences caused by this feature.\n\n"
-            "  • You are aware this is an ADVANCED feature and you\n"
-            "    have taken the necessary precautions.\n\n"
-            "Click OK to START Real PC Control, or Cancel to abort.",
-            icon="warning"
-        ):
-            return
-
-        # All 3 warnings accepted — proceed
         self._rpc_collect_to_config()
         save_realpc_config()
         if not REALPC_CONFIG.get("video_id", "").strip():
             messagebox.showwarning("Missing", "Enter a YouTube Video ID first.")
             return
+
+        if not REALPC_CONFIG.get("startup_confirmed", False):
+            # ── 3-step safety confirmation — only shown on the very first start.
+            if not messagebox.askokcancel(
+                "⚠  Real PC Control — Warning 1 of 3",
+                "You are about to give YouTube CHAT viewers direct control\n"
+                "over THIS computer's keyboard and mouse.\n\n"
+                "Anyone watching your stream will be able to:\n"
+                "  • Type text into any open window\n"
+                "  • Click and move your mouse\n"
+                "  • Open programs, close windows, press key combos\n\n"
+                "Make sure you understand the risks before continuing.\n\n"
+                "Click OK to proceed to the next warning, or Cancel to abort.",
+                icon="warning"
+            ):
+                return
+
+            if not messagebox.askokcancel(
+                "⚠  Real PC Control — Warning 2 of 3",
+                "SECURITY RISK — READ CAREFULLY:\n\n"
+                "• Viewers can type into password fields, browsers, terminals\n"
+                "• Viewers can close or crash applications on your PC\n"
+                "• Viewers can attempt to open Run dialogs, CMD, PowerShell\n"
+                "• There is NO undo — actions execute instantly on your machine\n\n"
+                "Recommended precautions:\n"
+                "  ✔  Use the Whitelist to restrict who can send commands\n"
+                "  ✔  Enable Failsafe (move mouse to top-left corner to stop)\n"
+                "  ✔  Close sensitive apps (browser, email, file manager) first\n"
+                "  ✔  Disable the Combo category if you don't want hotkeys used\n\n"
+                "Click OK to proceed to the final confirmation, or Cancel to abort.",
+                icon="warning"
+            ):
+                return
+
+            if not messagebox.askokcancel(
+                "⚠  Real PC Control — Warning 3 of 3  (Final)",
+                "FINAL CONFIRMATION:\n\n"
+                "By clicking OK you confirm that:\n\n"
+                "  • You take FULL responsibility for any actions\n"
+                "    performed on this computer through chat commands.\n\n"
+                "  • The developer (Nexovative) is NOT responsible\n"
+                "    for any damage, data loss, privacy breach, or\n"
+                "    unintended consequences caused by this feature.\n\n"
+                "  • You are aware this is an ADVANCED feature and you\n"
+                "    have taken the necessary precautions.\n\n"
+                "Click OK to START Real PC Control, or Cancel to abort.",
+                icon="warning"
+            ):
+                return
+
+            REALPC_CONFIG["startup_confirmed"] = True
+            save_realpc_config()
+
         if start_realpc_bot():
             self._rpc_status_lbl.configure(
                 text="⬤  Starting...", fg=self.YELLOW)
@@ -15535,6 +17239,233 @@ class UltraBotGUI:
                   width=16, cursor="hand2", command=_pick_random,
                   ).pack(pady=(0, 16))
 
+    def _build_mrtristinai_tab(self, parent):
+        """
+        MrTristinAI tab — chat with Groq-hosted LLMs directly from the app.
+        The Groq API key is entered once, saved to mrtristinai_config.json, and
+        reused automatically on every future launch.
+        """
+        outer = tk.Frame(parent, bg=self.BG)
+        outer.pack(fill="both", expand=True)
+
+        # ── API key + model card ──
+        setup_card = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        setup_card.pack(fill="x", padx=12, pady=(12, 6))
+
+        tk.Label(setup_card, text="Groq API Key",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).grid(
+                 row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        self._mrtristinai_key_var = tk.StringVar(value=MRTRISTINAI_CONFIG.get("groq_api_key", ""))
+        self._mrtristinai_key_entry = ttk.Entry(
+            setup_card, textvariable=self._mrtristinai_key_var,
+            width=44, font=("Segoe UI", 9), show="•")
+        self._mrtristinai_key_entry.grid(row=1, column=0, columnspan=2, sticky="ew",
+                                     padx=(0, 6), ipady=3)
+
+        self._mrtristinai_key_visible = False
+
+        def _toggle_key_visibility():
+            self._mrtristinai_key_visible = not self._mrtristinai_key_visible
+            self._mrtristinai_key_entry.configure(show="" if self._mrtristinai_key_visible else "•")
+            show_btn.configure(text="🙈 Hide" if self._mrtristinai_key_visible else "👁 Show")
+
+        show_btn = ttk.Button(setup_card, text="👁 Show", style="Dim.TButton",
+                               command=_toggle_key_visibility)
+        show_btn.grid(row=1, column=2, padx=(0, 6))
+
+        ttk.Button(setup_card, text="💾 Save Key", style="Green.TButton",
+                   command=self._mrtristinai_save_key).grid(row=1, column=3)
+
+        tk.Label(setup_card,
+                 text="Saved locally in mrtristinai_config.json — entered once, reused on every launch. "
+                      "Get a free key at console.groq.com/keys",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8), justify="left").grid(
+                 row=2, column=0, columnspan=4, sticky="w", pady=(4, 10))
+
+        tk.Label(setup_card, text="Model:", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=(0, 8))
+
+        self._mrtristinai_model_var = tk.StringVar(value=MRTRISTINAI_CONFIG.get("model", MRTRISTINAI_FALLBACK_MODELS[0]))
+        self._mrtristinai_model_combo = ttk.Combobox(
+            setup_card, textvariable=self._mrtristinai_model_var,
+            values=MRTRISTINAI_FALLBACK_MODELS, width=32,
+            font=("Segoe UI", 9), state="readonly")
+        self._mrtristinai_model_combo.grid(row=3, column=1, sticky="w")
+        self._mrtristinai_model_combo.bind("<<ComboboxSelected>>",
+                                       lambda e: self._mrtristinai_save_model())
+
+        ttk.Button(setup_card, text="🔄 Refresh Models", style="Dim.TButton",
+                   command=self._mrtristinai_refresh_models).grid(row=3, column=2, padx=(6, 0))
+
+        self._mrtristinai_model_status = tk.Label(setup_card, text="", bg=self.BG2,
+                                              fg=self.TEXTDIM, font=("Segoe UI", 8))
+        self._mrtristinai_model_status.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        setup_card.columnconfigure(1, weight=1)
+
+        # ── Chat card ──
+        chat_card = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        chat_card.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        tk.Label(chat_card, text="Chat",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        # Input row is packed FIRST and anchored to the bottom, so it always
+        # stays visible; the chat history frame is packed after and fills
+        # whatever space remains above it. (Packing order matters here —
+        # an expand=True widget packed first would claim all the space and
+        # push a later side="bottom" widget out of view.)
+        input_row = tk.Frame(chat_card, bg=self.BG2)
+        input_row.pack(side="bottom", fill="x", pady=(8, 0))
+
+        self._mrtristinai_input_var = tk.StringVar()
+        mrtristinai_entry = ttk.Entry(input_row, textvariable=self._mrtristinai_input_var,
+                                  font=("Segoe UI", 10))
+        mrtristinai_entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 6))
+        mrtristinai_entry.bind("<Return>", lambda e: self._mrtristinai_send())
+
+        self._mrtristinai_send_btn = ttk.Button(input_row, text="Send ➤", style="Accent.TButton",
+                                            command=self._mrtristinai_send)
+        self._mrtristinai_send_btn.pack(side="left", padx=(0, 6))
+
+        ttk.Button(input_row, text="🗑 Clear Chat", style="Dim.TButton",
+                   command=self._mrtristinai_clear_chat).pack(side="left")
+
+        chat_frame = tk.Frame(chat_card, bg=self.BORDER, bd=1)
+        chat_frame.pack(fill="both", expand=True)
+        self._mrtristinai_chat_view = scrolledtext.ScrolledText(
+            chat_frame,
+            bg=self.CONSOLE, fg=self.TEXT,
+            font=("Segoe UI", 10),
+            insertbackground=self.TEXT,
+            selectbackground=self.ACCENT,
+            relief="flat", bd=0, state="disabled", wrap="word")
+        self._mrtristinai_chat_view.pack(fill="both", expand=True, padx=1, pady=1)
+        self._mrtristinai_chat_view.tag_config("user_tag", foreground=self.ACCENT2, font=("Segoe UI", 10, "bold"))
+        self._mrtristinai_chat_view.tag_config("ai_tag", foreground=self.GREEN, font=("Segoe UI", 10, "bold"))
+        self._mrtristinai_chat_view.tag_config("err_tag", foreground=self.RED)
+
+        self._mrtristinai_history = []   # list of {"role":.., "content":..} sent to Groq for context
+        self._mrtristinai_busy = False
+
+
+        # If a key is already saved, quietly refresh the model list in the
+        # background so the dropdown reflects what's actually available.
+        if MRTRISTINAI_CONFIG.get("groq_api_key"):
+            self._mrtristinai_refresh_models(silent=True)
+
+    def _mrtristinai_safe_after(self, callback):
+        """
+        Like self.root.after(0, callback), but tolerates the app having
+        already closed. Background MrTristinAI requests run in daemon threads
+        and can finish after the user closes the window / the Tk main
+        loop has exited — calling root.after() at that point raises
+        RuntimeError: main thread is not in main loop. That's not a real
+        bug (there's simply no UI left to update), so we just drop the
+        update instead of crashing the thread with a traceback.
+        """
+        try:
+            self.root.after(0, callback)
+        except RuntimeError:
+            pass
+
+    def _mrtristinai_append_chat(self, who: str, text: str, tag: str):
+        self._mrtristinai_chat_view.configure(state="normal")
+        self._mrtristinai_chat_view.insert("end", f"{who}: ", tag)
+        self._mrtristinai_chat_view.insert("end", f"{text}\n\n")
+        self._mrtristinai_chat_view.configure(state="disabled")
+        self._mrtristinai_chat_view.see("end")
+
+    def _mrtristinai_clear_chat(self):
+        self._mrtristinai_history = []
+        self._mrtristinai_chat_view.configure(state="normal")
+        self._mrtristinai_chat_view.delete("1.0", "end")
+        self._mrtristinai_chat_view.configure(state="disabled")
+
+    def _mrtristinai_save_key(self):
+        key = self._mrtristinai_key_var.get().strip()
+        MRTRISTINAI_CONFIG["groq_api_key"] = key
+        save_mrtristinai_config()
+        if key:
+            messagebox.showinfo("MrTristinAI", "Groq API key saved. It will be reused automatically next time you open the app.")
+            self._mrtristinai_refresh_models(silent=True)
+        else:
+            messagebox.showinfo("MrTristinAI", "API key cleared.")
+
+    def _mrtristinai_save_model(self):
+        MRTRISTINAI_CONFIG["model"] = self._mrtristinai_model_var.get().strip()
+        save_mrtristinai_config()
+
+    def _mrtristinai_refresh_models(self, silent: bool = False):
+        key = self._mrtristinai_key_var.get().strip()
+        if not silent:
+            self._mrtristinai_model_status.configure(text="Fetching model list...", fg=self.TEXTDIM)
+
+        def _work():
+            models = groq_list_models(key)
+
+            def _apply():
+                current = self._mrtristinai_model_var.get()
+                self._mrtristinai_model_combo.configure(values=models)
+                if current not in models and models:
+                    self._mrtristinai_model_var.set(models[0])
+                    MRTRISTINAI_CONFIG["model"] = models[0]
+                    save_mrtristinai_config()
+                if not silent:
+                    self._mrtristinai_model_status.configure(
+                        text=f"{len(models)} model(s) available.", fg=self.GREEN)
+            self._mrtristinai_safe_after(_apply)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _mrtristinai_send(self):
+        if self._mrtristinai_busy:
+            return
+        text = self._mrtristinai_input_var.get().strip()
+        if not text:
+            return
+
+        key = self._mrtristinai_key_var.get().strip()
+        if not key:
+            messagebox.showwarning("MrTristinAI", "Enter and save your Groq API key first.")
+            return
+
+        model = self._mrtristinai_model_var.get().strip() or MRTRISTINAI_FALLBACK_MODELS[0]
+
+        self._mrtristinai_input_var.set("")
+        self._mrtristinai_append_chat("You", text, "user_tag")
+        self._mrtristinai_history.append({"role": "user", "content": text})
+
+        self._mrtristinai_busy = True
+        self._mrtristinai_send_btn.configure(state="disabled")
+
+        def _work():
+            try:
+                messages = [{"role": "system", "content": MRTRISTINAI_CONFIG.get("system_prompt", MRTRISTINAI_CONFIG_DEFAULT_PROMPT)}]
+                messages.extend(self._mrtristinai_history[-20:])   # keep last 20 turns of context
+                reply = groq_chat_completion(key, model, messages)
+            except Exception as e:
+                reply = None
+                error = str(e)
+            else:
+                error = None
+
+            def _apply():
+                self._mrtristinai_busy = False
+                self._mrtristinai_send_btn.configure(state="normal")
+                if error:
+                    self._mrtristinai_append_chat("Error", error, "err_tag")
+                else:
+                    self._mrtristinai_history.append({"role": "assistant", "content": reply})
+                    self._mrtristinai_append_chat("MrTristinAI", reply, "ai_tag")
+            self._mrtristinai_safe_after(_apply)
+
+        threading.Thread(target=_work, daemon=True).start()
+
 
 # ========================= MAIN =========================
 if __name__ == '__main__':
@@ -15542,6 +17473,13 @@ if __name__ == '__main__':
     load_user_mgmt()
     load_event_log()
     load_permissions_config()
+    load_yt_log_relay_config()
+    if YT_LOG_RELAY_CONFIG.get("enabled"):
+        start_yt_log_relay_worker()
+    load_host_switch_config()
+    host_switch_autodetect_role()
+    start_host_switch_server()
+    threading.Thread(target=host_switch_test_connection_and_handshake, daemon=True).start()
     load_sound_config()
     load_multi_stream_config()
     load_scheduler_config()
@@ -15580,6 +17518,66 @@ if __name__ == '__main__':
     #    as part of that (they read their own already-persisted config files).
     #    Real PC Control deliberately does NOT auto-resume -- see the note below. ──
     if _AUTOSTART_EVERYTHING:
+        def _relaunch_video_sequence():
+            print("[AutoStart] relaunch video sequence fired.")
+            try:
+                if not hasattr(app, "root") or not app.root.winfo_exists():
+                    app.root.after(250, _relaunch_video_sequence)
+                    return
+
+                app.ensure_video_window()
+                print("[AutoStart] Launched video panel on relaunch.")
+                if not OBS_CONFIG.get("enabled"):
+                    print("[AutoStart] OBS disabled, skipping relaunch video/OBS bind.")
+                    return
+
+                def _connect_and_play():
+                    # NOTE: this must NOT run directly on the Tk mainloop thread. video_play_url()
+                    # -> _video_play_queue_current() -> _video_ensure_window_sync() blocks its
+                    # calling thread waiting on a `root.after(0, ...)` callback to fire. If that
+                    # call chain runs *from* a root.after(...)-scheduled callback (i.e. on the
+                    # mainloop thread itself), the mainloop is stuck inside the wait and can never
+                    # service its own newly-scheduled callback -- a guaranteed 5s deadlock/timeout
+                    # every relaunch, which is exactly the "couldn't open the video window" error
+                    # seen after "Connecting OBS WebSocket before relaunch video binding." Running
+                    # this on a plain background thread lets _video_ensure_window_sync's after(0, ...)
+                    # hop to the mainloop normally.
+                    try:
+                        if not _obs_connected:
+                            print("[AutoStart] Connecting OBS WebSocket before relaunch video binding.")
+                            obs_connect()
+                        vid = (app._yt_var.get() or "").strip() or VIDEO_ID or ""
+                        if not vid:
+                            print("[AutoStart] No video ID available for relaunch video panel playback.")
+                            return
+                        ok = video_play_url(_video_url_from_id(vid))
+                        if ok:
+                            print(f"[AutoStart] Playing relaunch video ID: {vid}")
+                        else:
+                            print(f"[AutoStart] Relaunch video playback failed to start for video ID: {vid} "
+                                  f"(status: {video_status_text})")
+                    except Exception:
+                        print(f'[AutoStart] relaunch playback failed: Python exception: "{traceback.format_exc()}"')
+
+                def _finish_video_bind():
+                    try:
+                        capture_value = _video_panel_window_capture_string()
+                        if capture_value:
+                            obs_set_source_window_capture("video", capture_value)
+                            print(f"[AutoStart] OBS video source bound to video panel window: {capture_value.splitlines()[1] if chr(10) in capture_value else capture_value}")
+                        else:
+                            print("[AutoStart] Could not read video panel window id -- OBS bind skipped.")
+                        with video_lock:
+                            video_requests.clear()
+                        video_skip_track()
+                    except Exception:
+                        print(f'[AutoStart] video-bind finalize failed: Python exception: "{traceback.format_exc()}"')
+
+                app.root.after(5000, lambda: threading.Thread(target=_connect_and_play, daemon=True).start())
+                app.root.after(30000, lambda: threading.Thread(target=_finish_video_bind, daemon=True).start())
+            except Exception:
+                print(f'[AutoStart] Video panel relaunch sequence failed: Python exception: "{traceback.format_exc()}"')
+
         def _auto_start_everything():
             time.sleep(1.0)
             try:
@@ -15594,11 +17592,51 @@ if __name__ == '__main__':
                     print("[AutoStart] video_id.json had no video_id -- start the bot manually.")
             except Exception as e:
                 print(f'[AutoStart] Could not self-start from video_id.json: Python exception: "{traceback.format_exc()}"')
+
+            try:
+                app.root.after_idle(_relaunch_video_sequence)
+            except Exception:
+                app.root.after(250, _relaunch_video_sequence)
+
             if REALPC_CONFIG.get("enabled"):
-                print("[AutoStart] NOTE: Real PC Control was enabled before this restart. "
-                      "For safety it does NOT auto-resume -- go to the Real PC Control "
-                      "tab and click Start to re-confirm and resume it.")
+                REALPC_CONFIG["startup_confirmed"] = True
+                save_realpc_config()
+                try:
+                    if start_realpc_bot():
+                        print("[AutoStart] Real PC Control auto-started silently after relaunch.")
+                    else:
+                        print("[AutoStart] Real PC Control was already running after relaunch.")
+                except Exception as e:
+                    print(f'[AutoStart] Real PC Control auto-start failed: Python exception: "{traceback.format_exc()}"')
         threading.Thread(target=_auto_start_everything, daemon=True).start()
+
+    # ── Autostart Watchdog: if the user enabled the Auto-Start Watchdog setting
+    #    in the preferences, automatically resume listening on the last saved
+    #    video ID (video_id.json) when the app starts normally (not only when the
+    #    relaunch pipeline invoked --autostart-everything). This lets the bot
+    #    rejoin chat after a restart/crash without manual intervention.
+    try:
+        try:
+            _backend, _vm, _watchdog, _test_mode, *_rest = load_autostart_everything_config()
+        except Exception:
+            _watchdog = False
+        if _watchdog and not _AUTOSTART_EVERYTHING:
+            vid_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "video_id.json")
+            if os.path.exists(vid_path):
+                try:
+                    with open(vid_path, "r", encoding="utf-8") as f:
+                        vid = json.load(f).get("video_id", "")
+                    if vid:
+                        app._yt_var.set(vid)
+                        app._start_bot()
+                        print(f"[AutoStartWatchdog] Auto-started bot on video ID {vid} from video_id.json.")
+                    else:
+                        print("[AutoStartWatchdog] video_id.json had no video_id -- nothing to auto-start.")
+                except Exception:
+                    print(f'[AutoStartWatchdog] Could not auto-start from video_id.json: Python exception: "{traceback.format_exc()}"')
+    except Exception:
+        # Keep startup robust even if autostart logic fails for any reason.
+        print(f'[AutoStartWatchdog] Unexpected error while checking autostart watchdog: "{traceback.format_exc()}"')
 
     # ── Continuous auto-update watcher + file-edit hot-reload watchdog.
     #    Both run for the lifetime of the process, whether this is the main GUI
