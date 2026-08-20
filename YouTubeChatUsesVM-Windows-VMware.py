@@ -208,17 +208,6 @@ if platform.system() == "Windows" and not _is_admin():
 # ========================= VERSION & AUTO-UPDATE =========================
 VERSION = "1.0"   # increment this with every release
 
-# This script's own filename -- used to make sure a shared/misconfigured version.json
-# is actually meant for THIS file before ever applying an update. A single version.json
-# with one sha256/signature pair can only ever be valid for ONE file's actual content --
-# if the repo hosts multiple platform/backend variants (like this one does), each variant
-# needs its OWN version.json with a "filename" field matching this constant, or this
-# script has no way to tell "a new version exists" apart from "a DIFFERENT file's new
-# version exists, and applying it here would silently corrupt this install."
-# If version.json has no "filename" field at all, this check is skipped (so this still
-# works with a simple single-file repo) -- but IS enforced the moment that field appears.
-CURRENT_FILENAME = "YouTubeChatUsesVM-Windows-VMware.py"
-
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
 # GITHUB_SCRIPT_URL   → raw URL of THIS file (YouTubeChatUsesVM-Windows-VMware.py) in your repo
@@ -228,49 +217,10 @@ CURRENT_FILENAME = "YouTubeChatUsesVM-Windows-VMware.py"
 #   serves an HTML viewer page that urlopen() can't parse as source code.)
 #
 # Other Windows variants in this repo (for reference only -- deliberately NOT fetched or
-# checked by this script, only its OWN file above is ever downloaded/verified/replaced):
+# checked by this script, only its OWN file above is ever downloaded/replaced):
 #   https://github.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/blob/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Windows-VBox.py
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/version.json"
 GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/mrtristin449/TheUltimateYouTubeChatUsesVMsPythonScriptLiveBot247ScriptMrTristin/main/YouTubeChatUsesVMs/YouTubeChatUsesVM-Windows-VMware.py"
-
-# Public key used to verify the signature of downloaded updates.
-# This is SAFE to keep here — it can only verify signatures, not create them.
-# Generate this pair locally with generate_keys.py and paste the public key below.
-UPDATE_PUBLIC_KEY_HEX = "13eebf036b59fe64547d23cd2e3e23fae1d5ee086e912939a91d5535ed4df08b"
-
-
-def _verify_update_signature(file_bytes, expected_sha256_hex, signature_hex):
-    """
-    Verifies that file_bytes matches the expected SHA-256 hash, and that the
-    hash was signed by the holder of the private key matching
-    UPDATE_PUBLIC_KEY_HEX. Returns True only if both checks pass.
-    """
-    import hashlib
-    import binascii
-
-    try:
-        from nacl.signing import VerifyKey
-        from nacl.exceptions import BadSignatureError
-    except ImportError:
-        print("[Updater] PyNaCl is not installed; cannot verify update signature. Aborting update.")
-        return False
-
-    actual_hash = hashlib.sha256(file_bytes).hexdigest()
-    if actual_hash != expected_sha256_hex:
-        print("[Updater] Hash mismatch -- downloaded file does not match version.json. Rejecting update.")
-        return False
-
-    try:
-        verify_key = VerifyKey(binascii.unhexlify(UPDATE_PUBLIC_KEY_HEX))
-        verify_key.verify(expected_sha256_hex.encode("ascii"), binascii.unhexlify(signature_hex))
-        return True
-    except BadSignatureError:
-        print("[Updater] Signature is invalid. Rejecting update.")
-        return False
-    except Exception as e:
-        print(f"[Updater] Signature verification error: {e}. Rejecting update.")
-        return False
-
 
 def _check_for_update():
     """
@@ -289,28 +239,12 @@ def _check_for_update():
         logger.debug(f"Fetching version.json from {GITHUB_VERSION_URL}")
         with urllib.request.urlopen(GITHUB_VERSION_URL, timeout=5) as resp:
             data            = _json.loads(resp.read().decode("utf-8"))
-            latest_ver      = data.get("version", "0.0.0").strip()
-            expected_sha256 = data.get("sha256", "").strip()
-            signature_hex   = data.get("signature", "").strip()
-            version_filename = str(data.get("filename", "")).strip()
+            latest_ver = str(data.get("version", "0.0.0")).strip()
             logger.info(f"Update check: Latest version available: {latest_ver}")
     except Exception as e:
         # Network unavailable or repo not configured — silently skip.
         logger.error(f'Could not check for updates: {traceback.format_exc()}')
         print(f'[Updater] Could not check for updates: Python exception: "{traceback.format_exc()}"')
-        return False
-
-    if version_filename and version_filename != CURRENT_FILENAME:
-        # version.json is declaring itself as meant for a DIFFERENT file in this repo
-        # (a different platform/backend variant) -- this is exactly the "shared
-        # version.json breaks multi-variant repos" scenario. Refuse rather than risk
-        # applying a mismatched update: staying on the current version is always safer
-        # than silently overwriting this file with a different variant's content.
-        logger.warning(f"version.json is for '{version_filename}', not '{CURRENT_FILENAME}' - skipping update")
-        print(f"[Updater] version.json is for '{version_filename}', not this file "
-              f"('{CURRENT_FILENAME}') -- skipping update. This is expected if you just "
-              f"updated a DIFFERENT variant's version.json and haven't gotten to this "
-              f"one yet.")
         return False
 
     def _ver_tuple(v):
@@ -321,10 +255,6 @@ def _check_for_update():
 
     if _ver_tuple(latest_ver) <= _ver_tuple(VERSION):
         print(f"[Updater] Up to date ({VERSION}).")
-        return False
-
-    if not expected_sha256 or not signature_hex:
-        print("[Updater] version.json is missing sha256/signature fields. Refusing to update.")
         return False
 
     # New version found — ask the user.
@@ -346,16 +276,7 @@ def _check_for_update():
         with urllib.request.urlopen(GITHUB_SCRIPT_URL, timeout=30) as resp:
             new_code = resp.read()
 
-        _update_splash(9, "Verifying update signature...")
-        if not _verify_update_signature(new_code, expected_sha256, signature_hex):
-            _native_dialog_error(
-                "Update rejected: the downloaded file failed signature verification.\n\n"
-                "This could mean the update source has been compromised.\n"
-                "The bot will start with the current version.",
-                "Update Security Warning"
-            )
-            print("[Updater] Update rejected due to failed signature verification.")
-            return False
+        _update_splash(9, "Installing update...")
 
         with open(tmp_path, "wb") as f:
             f.write(new_code)
@@ -380,7 +301,7 @@ def _check_for_update():
 
 
 # ========================= CONTINUOUS AUTO-UPDATE + AUTO-RELAUNCH =========================
-# Separate from the signature-verified startup updater above. This runs continuously
+# Separate from the startup updater above. This runs continuously
 # in the background the whole time the bot is open, checking a NEW GitHub source once
 # per second (quietly -- only logs when something actually changes or on real errors,
 # not on every check). When it finds a new version, instead of overwriting the running
@@ -410,7 +331,7 @@ def _script_paths():
     # If we're already running as a previously-generated "_autostarteverything" copy --
     # plain OR numbered, e.g. "_autostarteverything(3)" -- strip that suffix so we don't
     # end up with "..._autostarteverything_autostarteverything" or comparing the wrong
-    # name against CURRENT_FILENAME/GITHUB_SCRIPT_URL.
+    # name against the configured update URL.
     base_name = _AUTOSTART_SUFFIX_RE.sub("", base_name)
     return script_path, folder, base_name
 
@@ -472,54 +393,20 @@ def _write_autostart_flags_json(folder):
         print(f'[AutoUpdate] Could not write autostart_flags.json: Python exception: "{traceback.format_exc()}"')
     return flags
 
-def _download_and_verify_update(version_data):
-    """Downloads the new script and verifies it against version.json's sha256+signature
-    using the exact same Ed25519 verification the safe startup updater uses (same
-    UPDATE_PUBLIC_KEY_HEX). Returns the verified bytes on success. Returns None (with
-    a clear log explaining why) if verification fails -- the caller must NOT proceed
-    with the update in that case. If version.json has no sha256/signature at all, this
-    downloads unverified with a clear warning, so the pipeline stays usable while
-    you're still setting up signing, but that gap is loud, not silent."""
+def _download_update(version_data):
+    """Downloads the script after the version-only check detects an update."""
     import urllib.request
-    version_filename = str(version_data.get("filename", "")).strip()
-    if version_filename and version_filename != CURRENT_FILENAME:
-        print(f"[AutoUpdate] SECURITY: version_data is for '{version_filename}', not this "
-              f"file ('{CURRENT_FILENAME}') -- refusing to download/apply. This should "
-              f"have been caught before this function was ever called; if you're seeing "
-              f"this, something upstream isn't checking version.json's filename first.")
-        return None
-    expected_sha256 = str(version_data.get("sha256", "")).strip()
-    signature_hex   = str(version_data.get("signature", "")).strip()
     try:
         with urllib.request.urlopen(AUTOUPDATE_SCRIPT_URL, timeout=30) as resp:
-            new_code = resp.read()
-    except Exception as e:
+            return resp.read()
+    except Exception:
         print(f'[AutoUpdate] Download failed: Python exception: "{traceback.format_exc()}"')
         return None
 
-    if not expected_sha256 or not signature_hex:
-        print("[AutoUpdate] WARNING: version.json has no sha256/signature -- installing "
-              "UNVERIFIED. Add both fields (signed with the key matching "
-              "UPDATE_PUBLIC_KEY_HEX) to get real update verification.")
-        return new_code
-
-    if not _verify_update_signature(new_code, expected_sha256, signature_hex):
-        print("[AutoUpdate] SECURITY: the downloaded update failed signature verification "
-              "-- staying on the current version. This means either version.json's "
-              "sha256/signature don't match the file at AUTOUPDATE_SCRIPT_URL, or they "
-              "weren't signed with the private key matching this script's "
-              "UPDATE_PUBLIC_KEY_HEX. Re-sign the release, or update UPDATE_PUBLIC_KEY_HEX "
-              "to your own key pair's public key if this repo uses a different one.")
-        return None
-
-    print("[AutoUpdate] Update signature verified OK.")
-    return new_code
-
 def _generate_relaunch_batch(folder, base_name, flags):
     """Writes the batch file: kill python, fetch a fresh version.json (for the record --
-    the actual script content was already downloaded and signature-verified by Python
-    before this was even called, and is written straight to disk, not re-fetched here
-    unverified), then launch the new {base_name}_autostarteverything.py with everything
+    the actual script content was already downloaded by Python before this was even
+    called, and is written straight to disk, not re-fetched here, then launch the new {base_name}_autostarteverything.py with everything
     auto-starting.
 
     Uses sys.executable (the exact interpreter this process is actually running under)
@@ -543,8 +430,8 @@ REM  Auto-generated by the bot's auto-update system. Do not run
 REM  this by hand unless you mean to force an update/relaunch --
 REM  step 1 below kills EVERY python.exe/pythonw.exe process on
 REM  this machine, not just this bot. The updated script itself
-REM  was already downloaded and signature-verified by Python
-REM  before this batch file was written -- this just re-fetches
+REM  was already downloaded by Python before this batch file was written --
+REM  this just re-fetches
 REM  version.json for the record and launches the new instance.
 REM ============================================================
 echo Stopping the running bot...
@@ -785,10 +672,8 @@ def _save_all_configs_before_relaunch():
 def trigger_relaunch_pipeline(reason, version_data=None):
     """Shared by both the version-update watcher and the file-edit watchdog below.
     If version_data is given (came from a real version.json check), the new script
-    is downloaded and signature-verified FIRST -- the pipeline aborts cleanly if
-    that fails, instead of installing something that didn't check out. If
-    version_data is None (a local file-edit trigger, nothing remote to verify
-    against), it skips straight to relaunching."""
+        is downloaded after a newer version is detected. If version_data is None (a local
+    file-edit trigger), it skips straight to relaunching."""
     global _autoupdate_relaunch_triggered
     with _autoupdate_lock:
         if _autoupdate_relaunch_triggered:
@@ -802,17 +687,17 @@ def trigger_relaunch_pipeline(reason, version_data=None):
     print(f"[AutoUpdate] This relaunch's autostart copy: {autostart_filename}")
 
     if version_data is not None:
-        verified_code = _download_and_verify_update(version_data)
-        if verified_code is None:
+        update_code = _download_update(version_data)
+        if update_code is None:
             _autoupdate_relaunch_triggered = False
             return
         try:
             with open(os.path.join(folder, f"{base_name}.py"), "wb") as f:
-                f.write(verified_code)
+                f.write(update_code)
             with open(os.path.join(folder, autostart_filename), "wb") as f:
-                f.write(verified_code)
+                f.write(update_code)
         except Exception as e:
-            print(f'[AutoUpdate] Could not write verified update to disk: Python exception: "{traceback.format_exc()}"')
+            print(f'[AutoUpdate] Could not write update to disk: Python exception: "{traceback.format_exc()}"')
             _autoupdate_relaunch_triggered = False
             return
     else:
@@ -866,8 +751,8 @@ def _autoupdate_watcher():
     AUTOUPDATE_POLL_INTERVAL seconds (5) using a conditional GET (If-None-Match/ETag)
     so repeated checks are cheap 304 responses -- logs nothing on a normal check, only
     when a new version is actually found or on a real (non-network-hiccup) error.
-    On detecting a new version: the new script is downloaded and signature-verified,
-    written to disk, and the bot restarts itself via the relaunch pipeline."""
+    On detecting a new version: the new script is downloaded, written to disk, and
+    the bot restarts itself via the relaunch pipeline."""
     import urllib.request
     import urllib.error
     last_etag = None
@@ -883,12 +768,6 @@ def _autoupdate_watcher():
                 last_etag = resp.headers.get("ETag", last_etag)
                 data = json.loads(resp.read().decode("utf-8"))
             consecutive_errors = 0
-            version_filename = str(data.get("filename", "")).strip()
-            if version_filename and version_filename != CURRENT_FILENAME:
-                # Same "shared version.json across multiple variants" safety check as
-                # _check_for_update() -- if it's declared for a different file, this
-                # isn't a real update for THIS script, so don't act on it.
-                continue
             latest_ver = str(data.get("version", "0.0.0")).strip()
             if _ver_tuple_v2(latest_ver) > _ver_tuple_v2(VERSION):
                 print(f"[AutoUpdate] New version detected: {latest_ver} (current: {VERSION}).")
@@ -8975,23 +8854,40 @@ class UltraBotGUI:
         card.pack(fill="x", padx=12, pady=(12,6))
 
         # YouTube ID
-        tk.Label(card, text="YouTube Video ID", bg=self.BG2,
+        tk.Label(card, text="Streamer.bot WS Port", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
                  row=0, column=0, sticky="w", padx=(0,8))
         self._yt_var = tk.StringVar()
         yt_entry = ttk.Entry(card, textvariable=self._yt_var, width=32,
                              font=("Segoe UI Mono", 10))
         yt_entry.grid(row=0, column=1, sticky="ew", padx=(0,12), ipady=4)
-        tk.Label(card, text="🔗", bg=self.BG2, fg=self.ACCENT,
-                 font=("Segoe UI",12)).grid(row=0, column=2, padx=2)
+        tk.Label(card, text="WS Password", bg=self.BG2,
+                 fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
+                 row=0, column=2, sticky="w", padx=(0,8))
+        self._sb_pass_var = tk.StringVar()
+        sb_pass_entry = ttk.Entry(card, textvariable=self._sb_pass_var, width=20,
+                                  font=("Segoe UI Mono", 10), show="*")
+        sb_pass_entry.grid(row=0, column=3, sticky="ew", padx=(0,12), ipady=4)
 
+
+        # Twitch channel (via Streamer.bot)
+        tk.Label(card, text="Twitch Channel", bg=self.BG2,
+                 fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
+                 row=1, column=0, sticky="w", padx=(0,8), pady=(10,0))
+        self._twitch_channel_var = tk.StringVar()
+        twitch_ch_entry = ttk.Entry(card, textvariable=self._twitch_channel_var, width=32,
+                                    font=("Segoe UI Mono", 10))
+        twitch_ch_entry.grid(row=1, column=1, sticky="ew", padx=(0,12), ipady=4, pady=(10,0))
+        tk.Label(card, text="(via Streamer.bot — used for Twitch chat detection)",
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI",8,"italic")).grid(
+                 row=1, column=2, columnspan=2, sticky="w", pady=(10,0))
         # Backend selector -- picks which tool/identifier the VM field below means
         tk.Label(card, text="Backend", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
-                 row=1, column=0, sticky="w", padx=(0,8), pady=(10,0))
+                 row=2, column=0, sticky="w", padx=(0,8), pady=(10,0))
         self._vm_backend_var = tk.StringVar(value="vmware")
         backend_radio_frame = tk.Frame(card, bg=self.BG2)
-        backend_radio_frame.grid(row=1, column=1, sticky="w", pady=(10,0))
+        backend_radio_frame.grid(row=2, column=1, sticky="w", pady=(10,0))
         ttk.Radiobutton(backend_radio_frame, text="VMware", variable=self._vm_backend_var,
                         value="vmware", command=lambda: self._on_vm_backend_changed()).pack(side="left", padx=(0,12))
         ttk.Radiobutton(backend_radio_frame, text="VBox", variable=self._vm_backend_var,
@@ -9000,26 +8896,26 @@ class UltraBotGUI:
         # VM selector
         self._vm_field_label = tk.Label(card, text="VMware .vmx Path", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold"))
-        self._vm_field_label.grid(row=2, column=0, sticky="w", padx=(0,8), pady=(10,0))
+        self._vm_field_label.grid(row=3, column=0, sticky="w", padx=(0,8), pady=(10,0))
         self._vm_var = tk.StringVar()
         self._vm_combo = ttk.Combobox(card, textvariable=self._vm_var,
                                       state="readonly", width=30,
                                       font=("Segoe UI",10))
         self._vm_combo.bind("<<ComboboxSelected>>",
                              lambda e: save_autostart_everything_config(backend=current_vm_backend, vm=self._vm_var.get().strip()))
-        self._vm_combo.grid(row=2, column=1, sticky="ew", padx=(0,12),
+        self._vm_combo.grid(row=3, column=1, sticky="ew", padx=(0,12),
                             pady=(10,0), ipady=3)
         ttk.Button(card, text="🔄 Refresh", style="Dim.TButton",
                    command=self._refresh_vm_list).grid(
                    row=2, column=2, pady=(10,0))
         self._vm_select_note = tk.Label(card, text="", bg=self.BG2,
                  fg=self.YELLOW, font=("Segoe UI", 8, "italic"))
-        self._vm_select_note.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2,0))
+        self._vm_select_note.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2,0))
 
         # Register a new .vmx (vmrun has no "list all VMs" command, so VMs are
         # registered locally in vms.json — alias is just a friendly label).
         reg_row = tk.Frame(card, bg=self.BG2)
-        reg_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(22, 0))
+        reg_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(22, 0))
         tk.Label(reg_row, text="Register VM — Alias:", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 8)).pack(side="left")
         self._reg_alias_var = tk.StringVar()
@@ -9046,7 +8942,7 @@ class UltraBotGUI:
             selectcolor=self.BG3, activebackground=self.BG2,
             activeforeground=self.TEXT, font=("Segoe UI", 9),
             command=self._on_auto_start_toggle)
-        auto_chk.grid(row=4, column=1, columnspan=2, sticky="w", pady=(10,0))
+        auto_chk.grid(row=5, column=1, columnspan=2, sticky="w", pady=(10,0))
 
         # Push this machine's VM name to the other Per-OS Host Switching machine
         # (see the "Per-OS Host Switching (EXPERIMENTAL)" panel on the OS Voting tab)
@@ -9061,7 +8957,7 @@ class UltraBotGUI:
             selectcolor=self.BG3, activebackground=self.BG2,
             activeforeground=self.TEXT, font=("Segoe UI", 9),
             command=self._on_sync_vm_name_toggle)
-        sync_vm_chk.grid(row=6, column=1, columnspan=2, sticky="w", pady=(6,0))
+        sync_vm_chk.grid(row=7, column=1, columnspan=2, sticky="w", pady=(6,0))
 
         card.columnconfigure(1, weight=1)
 
