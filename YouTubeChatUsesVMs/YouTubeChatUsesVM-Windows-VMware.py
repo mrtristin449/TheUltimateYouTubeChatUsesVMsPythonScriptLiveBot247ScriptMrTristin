@@ -3344,6 +3344,114 @@ def _streamerbot_authentication(password, salt, challenge):
     ).decode("ascii")
 
 
+def _streamerbot_chat_from_event(data):
+    """Normalize Streamer.bot events using the same paths as streamerBot.js."""
+    event = data.get("event") or {}
+    source = str(event.get("source", "")).lower()
+    event_type = str(event.get("type", ""))
+    accepted = {
+        "twitch": {"ChatMessage", "Whisper", "Subscriber", "Follow"},
+        "youtube": {"Message", "SuperChat", "Sponsor", "Member"},
+        "kick": {"ChatMessage", "PresentViewers"},
+    }
+    if event_type not in accepted.get(source, set()):
+        return None
+
+    msg_data = data.get("data") or {}
+    user = msg_data.get("user") or msg_data.get("author") or {}
+    message_obj = msg_data.get("message") or {}
+    if isinstance(message_obj, str):
+        final_text = message_obj
+        message_obj = {}
+    else:
+        final_text = (
+            message_obj.get("message") or message_obj.get("body") or
+            message_obj.get("text") or message_obj.get("value") or
+            msg_data.get("text") or msg_data.get("body") or ""
+        )
+    if not isinstance(final_text, str):
+        final_text = str(final_text or "")
+
+    if source == "twitch":
+        role = user.get("role", 0) or 0
+    elif source == "youtube":
+        role = 3 if user.get("isOwner") else (2 if user.get("isModerator") else 0)
+    else:
+        role = user.get("role", 0) or 0
+    try:
+        role = int(role)
+    except (TypeError, ValueError):
+        role = 0
+
+    author = (user.get("login") or user.get("name") or user.get("userName") or
+              user.get("display") or user.get("displayName") or "unknown")
+    display = (user.get("display") or user.get("displayName") or user.get("name") or
+               user.get("userName") or user.get("login") or "Unknown")
+    msg_id = (message_obj.get("id") or event.get("id") or msg_data.get("id") or
+              msg_data.get("messageId"))
+    if not msg_id:
+        msg_id = f"sb:{source}:{time.time_ns()}"
+    return {
+        "platform": source,
+        "author": {"name": str(author), "display": str(display), "role": role},
+        "message": final_text.strip(),
+        "id": str(msg_id),
+    }
+
+
+def _handle_streamerbot_chat(chat_item):
+    """Send one normalized Streamer.bot chat item to the GUI, HTML, and commands."""
+    msg = chat_item.get("message", "").strip()
+    if not msg:
+        return
+    author_obj = chat_item.get("author") or {}
+    display = author_obj.get("display") or author_obj.get("name") or "Unknown"
+    user = normalize_username(author_obj.get("name") or display)
+    role = int(author_obj.get("role", 0) or 0)
+    is_owner = role >= 3
+    is_mod = is_owner or role >= 2 or user == ADMIN_USERNAME.lower()
+    msg_id = chat_item.get("id")
+
+    update_overlay(author=display, message=msg, msg_id=msg_id)
+    active_users.add(str(display).strip())
+    if _gui_app is not None:
+        try:
+            _gui_app._append_chat(
+                user, msg, is_owner=is_owner, is_command=msg.startswith("!"),
+                is_banned=(user in banned_users and time.time() < banned_users.get(user, 0)),
+                is_mod=is_mod,
+            )
+        except Exception:
+            pass
+    print(f"[Streamer.bot Chat] {display}: {msg}")
+
+    if not msg.startswith("!"):
+        return
+    if user in banned_users and time.time() < banned_users.get(user, 0):
+        return
+    if whitelist_users and not is_owner and user not in whitelist_users:
+        return
+    if CHAT_COMMANDS_PAUSED and not is_mod and not msg.lower().startswith("!enablechat"):
+        return
+
+    # Preserve the familiar chained-command syntax used by the Pytchat path.
+    normalized = re.sub(r"\+\s*!", "!", msg)
+    parts = [p.strip() for p in normalized.replace("|", "!").split("!") if p.strip()]
+    for part in parts:
+        command_line = "!" + part
+        sub = part.split(maxsplit=1)
+        cmd = sub[0].lower()
+        global_cd = PERMISSIONS_CONFIG.get("global_command_cooldown", 60)
+        if global_cd > 0 and not is_mod:
+            last = _global_command_cooldowns.get(user, 0)
+            if time.time() - last < global_cd:
+                continue
+            _global_command_cooldowns[user] = time.time()
+        _record_command(cmd, user)
+        ok, result = run_single_bot_command(command_line)
+        print(f"[Streamer.bot Command] {user}: {result}")
+
+
 def _streamerbot_ws_worker():
     try:
         import websocket
@@ -3360,42 +3468,42 @@ def _streamerbot_ws_worker():
             url = f"ws://{host}:{port}"
             print(f"[Streamer.bot WS] Connecting to {url}...")
             ws = websocket.create_connection(url, timeout=10)
-            ws.settimeout(1.0)
-
             hello = json.loads(ws.recv())
+            if hello.get("request") != "Hello":
+                raise RuntimeError(f"expected Hello, received {hello}")
             auth = hello.get("authentication") or {}
-            if password and auth.get("salt") and auth.get("challenge"):
+            if auth.get("salt") and auth.get("challenge"):
+                if not password:
+                    raise RuntimeError("Streamer.bot requires a WebSocket password")
                 ws.send(json.dumps({
-                    "request": "Authenticate",
-                    "id": "vmware-bot-auth",
-                    "authentication": _streamerbot_authentication(
-                        password, auth["salt"], auth["challenge"]
-                    ),
+                    "request": "Authenticate", "id": "vmware-bot-auth",
+                    "authentication": _streamerbot_authentication(password, auth["salt"], auth["challenge"]),
                 }))
                 auth_response = json.loads(ws.recv())
-                if auth_response.get("status") not in (None, "ok", "OK", True):
+                if auth_response.get("status") != "ok":
                     raise RuntimeError(f"authentication failed: {auth_response}")
-
-            # Subscribe to chat events. This connection is independent of Pytchat.
             ws.send(json.dumps({
-                "request": "Subscribe",
-                "id": "vmware-bot-subscribe",
+                "request": "Subscribe", "id": "vmware-bot-subscribe",
                 "events": {
-                    "Twitch": ["ChatMessage"],
-                    "YouTube": ["ChatMessage"],
+                    "Twitch": ["ChatMessage", "Whisper", "Subscriber", "Follow"],
+                    "YouTube": ["Message", "SuperChat", "Sponsor", "Member"],
+                    "Kick": ["ChatMessage", "PresentViewers"],
                 },
             }))
-            print("[Streamer.bot WS] Connected and subscribed to chat events.")
+            ws.send(json.dumps({"request": "GetBroadcaster", "id": "vmware-bot-broadcaster"}))
+            print("[Streamer.bot WS] Connected and subscribed to Twitch/YouTube/Kick chat events.")
+            ws.settimeout(1.0)
 
             while not _streamerbot_ws_stop.is_set():
                 try:
-                    message = ws.recv()
-                    if message:
-                        # Keep the connection alive and expose events in the console.
-                        # Pytchat remains stopped during auto-restart.
-                        data = json.loads(message)
-                        if data.get("event"):
-                            print(f"[Streamer.bot WS] Event: {data.get('event')}")
+                    raw = ws.recv()
+                    if not raw:
+                        continue
+                    data = json.loads(raw)
+                    if data.get("event"):
+                        item = _streamerbot_chat_from_event(data)
+                        if item:
+                            _handle_streamerbot_chat(item)
                 except Exception as e:
                     if "timed out" not in str(e).lower() and "timeout" not in str(e).lower():
                         raise
