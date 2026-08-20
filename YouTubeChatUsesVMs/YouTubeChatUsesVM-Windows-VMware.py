@@ -8961,22 +8961,25 @@ class UltraBotGUI:
 
         # Register a new .vmx (vmrun has no "list all VMs" command, so VMs are
         # registered locally in vms.json — alias is just a friendly label).
-        reg_row = tk.Frame(card, bg=self.BG2)
-        # Keep this row below the Host Switch Sync controls (rows 6-7); using row 6
-        # here made the registration widgets overlap the Host Switch label/checkbox.
-        reg_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(22, 0))
-        tk.Label(reg_row, text="Register VM — Alias:", bg=self.BG2, fg=self.TEXTDIM,
-                 font=("Segoe UI", 8)).pack(side="left")
+        # Place each widget directly in the card grid so the registration row uses
+        # the same label/input columns as the rows above instead of a nested pack().
+        tk.Label(card, text="Register VM — Alias:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).grid(
+                 row=8, column=0, sticky="w", padx=(0, 8), pady=(22, 0))
         self._reg_alias_var = tk.StringVar()
-        ttk.Entry(reg_row, textvariable=self._reg_alias_var, width=10,
-                  font=("Segoe UI", 9)).pack(side="left", padx=(4, 8))
-        tk.Label(reg_row, text=".vmx Path:", bg=self.BG2, fg=self.TEXTDIM,
-                 font=("Segoe UI", 8)).pack(side="left")
+        ttk.Entry(card, textvariable=self._reg_alias_var, width=10,
+                  font=("Segoe UI", 9)).grid(
+                  row=8, column=1, sticky="ew", padx=(0, 12), pady=(22, 0))
+        tk.Label(card, text=".vmx Path:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).grid(
+                 row=8, column=2, sticky="w", padx=(0, 8), pady=(22, 0))
         self._reg_vmx_var = tk.StringVar()
-        ttk.Entry(reg_row, textvariable=self._reg_vmx_var, width=34,
-                  font=("Segoe UI Mono", 9)).pack(side="left", padx=(4, 8))
-        ttk.Button(reg_row, text="＋ Add", style="Green.TButton",
-                   command=self._add_vm_entry).pack(side="left")
+        ttk.Entry(card, textvariable=self._reg_vmx_var, width=34,
+                  font=("Segoe UI Mono", 9)).grid(
+                  row=8, column=3, sticky="ew", padx=(0, 8), pady=(22, 0))
+        ttk.Button(card, text="＋ Add", style="Green.TButton",
+                   command=self._add_vm_entry).grid(
+                   row=8, column=4, sticky="ew", pady=(22, 0))
 
         self._on_vm_backend_changed()  # populate the combo for the initial "vmware" selection
 
@@ -9009,6 +9012,7 @@ class UltraBotGUI:
         sync_vm_chk.grid(row=7, column=1, columnspan=2, sticky="w", pady=(6,0))
 
         card.columnconfigure(1, weight=1)
+        card.columnconfigure(3, weight=1)
 
         # Start / Stop buttons
         btn_frame = tk.Frame(parent, bg=self.BG)
