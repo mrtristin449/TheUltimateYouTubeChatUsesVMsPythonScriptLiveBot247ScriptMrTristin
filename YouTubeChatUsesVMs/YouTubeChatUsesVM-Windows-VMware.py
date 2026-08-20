@@ -206,7 +206,46 @@ if platform.system() == "Windows" and not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "1.0"   # increment this with every release
+# The first startup uses 1.0 and persists the current version beside this script.
+# Accepted updates overwrite this file with the newer version from version.json.
+_DEFAULT_APP_VERSION = "1.0"
+_APP_VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_version.txt")
+
+
+def _load_app_version():
+    """Load the persisted application version, initializing it to 1.0 once."""
+    env_version = os.environ.get("APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+    try:
+        with open(_APP_VERSION_FILE, "r", encoding="utf-8") as f:
+            saved_version = f.read().strip()
+        if saved_version:
+            return saved_version
+    except Exception:
+        pass
+    try:
+        with open(_APP_VERSION_FILE, "w", encoding="utf-8") as f:
+            f.write(_DEFAULT_APP_VERSION)
+    except Exception as e:
+        logger.warning(f"Could not initialize {_APP_VERSION_FILE}: {e}")
+    return _DEFAULT_APP_VERSION
+
+
+def _save_app_version(version):
+    """Persist the version accepted by the user before the program restarts."""
+    version = str(version).strip()
+    if not version:
+        return
+    try:
+        with open(_APP_VERSION_FILE, "w", encoding="utf-8") as f:
+            f.write(version)
+        os.environ["APP_VERSION"] = version
+    except Exception as e:
+        logger.warning(f"Could not save application version {version}: {e}")
+
+
+VERSION = _load_app_version()
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -247,6 +286,10 @@ def _check_for_update():
         print(f'[Updater] Could not check for updates: Python exception: "{traceback.format_exc()}"')
         return False
 
+    if not VERSION:
+        print("[Updater] APP_VERSION is not set; skipping version comparison.")
+        return False
+
     def _ver_tuple(v):
         try:
             return tuple(int(x) for x in v.strip().split("."))
@@ -283,6 +326,7 @@ def _check_for_update():
         # Atomic replace: rename tmp over the live file.
         if os.path.exists(script_path):
             os.replace(tmp_path, script_path)
+        _save_app_version(latest_ver)
         print(f"[Updater] Updated to {latest_ver}. Restarting...")
         # Restart the process with the same arguments.
         subprocess.Popen([sys.executable, script_path] + sys.argv[1:])
@@ -696,6 +740,7 @@ def trigger_relaunch_pipeline(reason, version_data=None):
                 f.write(update_code)
             with open(os.path.join(folder, autostart_filename), "wb") as f:
                 f.write(update_code)
+            _save_app_version(str(version_data.get("version", "")).strip())
         except Exception as e:
             print(f'[AutoUpdate] Could not write update to disk: Python exception: "{traceback.format_exc()}"')
             _autoupdate_relaunch_triggered = False
@@ -769,6 +814,8 @@ def _autoupdate_watcher():
                 data = json.loads(resp.read().decode("utf-8"))
             consecutive_errors = 0
             latest_ver = str(data.get("version", "0.0.0")).strip()
+            if not VERSION:
+                continue
             if _ver_tuple_v2(latest_ver) > _ver_tuple_v2(VERSION):
                 print(f"[AutoUpdate] New version detected: {latest_ver} (current: {VERSION}).")
                 trigger_relaunch_pipeline(f"New version {latest_ver} available", version_data=data)
