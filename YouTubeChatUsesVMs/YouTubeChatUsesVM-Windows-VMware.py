@@ -1047,6 +1047,7 @@ _update_splash(50, "Importing system libraries...")
 import threading
 import re
 import win32com.client
+import pythoncom
 import http.server
 import socketserver
 import json
@@ -5429,7 +5430,14 @@ def speak_text(text):
     if not SOUND_CONFIG.get("tts_enabled", True):
         return
     def _speak():
+        com_initialized = False
         try:
+            # SAPI is a COM automation server. This function runs on a fresh
+            # background thread, so COM must be initialized on THIS thread
+            # before Dispatch() is called.
+            pythoncom.CoInitialize()
+            com_initialized = True
+
             speaker = win32com.client.Dispatch("SAPI.SpVoice")
             rate   = int(SOUND_CONFIG.get("tts_rate", 150))
             volume = int(SOUND_CONFIG.get("tts_volume", 100))
@@ -5441,6 +5449,12 @@ def speak_text(text):
             speaker.Speak(text)
         except Exception as e:
             print(f'[Speech] Error: Python exception: "{traceback.format_exc()}"')
+        finally:
+            if com_initialized:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
     threading.Thread(target=_speak, daemon=True).start()
 
 def _play_chime(note_freqs, note_duration=0.12, sample_rate=44100, volume=0.25):
