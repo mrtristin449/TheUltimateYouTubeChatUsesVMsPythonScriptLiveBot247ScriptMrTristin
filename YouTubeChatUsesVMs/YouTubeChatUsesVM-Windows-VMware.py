@@ -3303,6 +3303,7 @@ STREAMERBOT_WS_CONFIG = {
     "host": "127.0.0.1",
     "port": 8080,
     "password": "",
+    "twitch_channel": "",
     "enabled": True,
 }
 _streamerbot_ws_stop = threading.Event()
@@ -9069,6 +9070,8 @@ class UltraBotGUI:
             except (TypeError, ValueError):
                 return
             STREAMERBOT_WS_CONFIG["password"] = self._sb_pass_var.get()
+            if hasattr(self, "_twitch_channel_var"):
+                STREAMERBOT_WS_CONFIG["twitch_channel"] = self._twitch_channel_var.get().strip()
             save_streamerbot_ws_config()
 
         self._yt_var.trace_add("write", _save_streamerbot_fields)
@@ -9079,10 +9082,11 @@ class UltraBotGUI:
         tk.Label(card, text="Twitch Channel", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
                  row=1, column=0, sticky="w", padx=(0,8), pady=(10,0))
-        self._twitch_channel_var = tk.StringVar()
+        self._twitch_channel_var = tk.StringVar(value=str(STREAMERBOT_WS_CONFIG.get("twitch_channel", "")))
         twitch_ch_entry = ttk.Entry(card, textvariable=self._twitch_channel_var, width=32,
                                     font=("Segoe UI Mono", 10))
         twitch_ch_entry.grid(row=1, column=1, sticky="ew", padx=(0,12), ipady=4, pady=(10,0))
+        self._twitch_channel_var.trace_add("write", _save_streamerbot_fields)
         tk.Label(card, text="(via Streamer.bot — used for Twitch chat detection)",
                  bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI",8,"italic")).grid(
                  row=1, column=2, columnspan=2, sticky="w", pady=(10,0))
@@ -10784,6 +10788,15 @@ class UltraBotGUI:
             backend = self._vm_backend_var.get() if hasattr(self, "_vm_backend_var") else globals().get("current_vm_backend", "vmware")
             vm = self._vm_var.get().strip() if hasattr(self, "_vm_var") else globals().get("VMX_PATH", "")
             save_autostart_everything_config(backend=backend, vm=vm)
+            # Persist Streamer.bot and Twitch fields on the same five-second timer,
+            # even when the user has not pressed a Save button.
+            if hasattr(self, "_yt_var"):
+                STREAMERBOT_WS_CONFIG["port"] = int(self._yt_var.get().strip() or 8080)
+            if hasattr(self, "_sb_pass_var"):
+                STREAMERBOT_WS_CONFIG["password"] = self._sb_pass_var.get()
+            if hasattr(self, "_twitch_channel_var"):
+                STREAMERBOT_WS_CONFIG["twitch_channel"] = self._twitch_channel_var.get().strip()
+            save_streamerbot_ws_config()
         except Exception:
             pass
         finally:
@@ -10922,16 +10935,14 @@ class UltraBotGUI:
             save_autostart_everything_config(test_mode=False)
 
     def _start_bot(self):
-        global VIDEO_ID, VMX_PATH, current_os_vm, current_vm_backend
-        yt  = self._yt_var.get().strip()
-        vm  = self._vm_var.get().strip()
-        if not yt:
-            messagebox.showerror("Missing Input", "Please enter a YouTube Video ID.")
-            return
+        global VMX_PATH, current_os_vm, current_vm_backend
+        vm = self._vm_var.get().strip()
         if self._bot_running:
             self._log("⚠️ Bot is already running!")
             return
 
+        # Keep the selected VM/backend behavior unchanged; only the chat transport
+        # changes from Pytchat to Streamer.bot WebSocket.
         if OS_VOTING_ENABLED:
             valid_entries = [e for e in OS_LIST if e.get("name") and e.get("trigger") and e.get("vm")]
             if len(valid_entries) < 2:
@@ -10939,18 +10950,15 @@ class UltraBotGUI:
                     "OS Voting is enabled but fewer than 2 valid OS entries are configured.\n"
                     "Go to the OS Voting tab and fix the configuration, or disable voting.")
                 return
-            # Use the last active VM if it is still in the list, otherwise fall back to the first entry
             valid_vms = [e["vm"] for e in valid_entries]
             if current_os_vm and current_os_vm in valid_vms:
                 start_vm_name = current_os_vm
                 start_entry = next(e for e in valid_entries if e["vm"] == current_os_vm)
-                start_name = start_entry["name"]
-                self._log(f"[OSVoting] Resuming with last active OS: '{start_name}'.")
+                self._log(f"[OSVoting] Resuming with last active OS: '{start_entry['name']}'.")
             else:
                 start_entry = valid_entries[0]
                 start_vm_name = start_entry["vm"]
-                start_name    = start_entry["name"]
-                self._log(f"[OSVoting] No saved OS found — starting with first entry: '{start_name}'.")
+                self._log(f"[OSVoting] No saved OS found — starting with first entry: '{start_entry['name']}'.")
             VMX_PATH = start_vm_name
             current_os_vm = start_vm_name
             current_vm_backend = start_entry.get("backend", "vmware")
@@ -10962,36 +10970,41 @@ class UltraBotGUI:
             current_os_vm = vm
             current_vm_backend = self._vm_backend_var.get() if hasattr(self, "_vm_backend_var") else "vmware"
 
-        VIDEO_ID = yt
+        try:
+            STREAMERBOT_WS_CONFIG["port"] = int(self._yt_var.get().strip() or 8080)
+        except (TypeError, ValueError):
+            messagebox.showerror("Invalid WebSocket Port", "Enter a valid Streamer.bot WebSocket port.")
+            return
+        STREAMERBOT_WS_CONFIG["password"] = self._sb_pass_var.get()
+        STREAMERBOT_WS_CONFIG["twitch_channel"] = self._twitch_channel_var.get().strip()
+        STREAMERBOT_WS_CONFIG["enabled"] = True
+        save_streamerbot_ws_config()
+
+        if not start_streamerbot_ws():
+            messagebox.showerror("Streamer.bot WebSocket", "Streamer.bot WebSocket is disabled or could not be started.")
+            return
+
         self._bot_running = True
         bot_stop_event.clear()
         self._set_status("Running", self.GREEN)
-
-        # Redirect stdout → console
         self._console_redir = ConsoleRedirect(self._console)
         self._console_redir.start()
 
-        self._log(f"Starting bot → YT: {VIDEO_ID}  |  VM: {VMX_PATH}")
-        notify("Bot Started", f"Listening on: {VIDEO_ID}\nVM: {VMX_PATH}")
+        ws_target = f"{STREAMERBOT_WS_CONFIG.get('host', '127.0.0.1')}:{STREAMERBOT_WS_CONFIG['port']}"
+        self._log(f"Starting bot → Streamer.bot WS: {ws_target}  |  Twitch: {STREAMERBOT_WS_CONFIG['twitch_channel'] or '(all configured channels)'}  |  VM: {VMX_PATH}")
+        notify("Bot Started", f"Streamer.bot WebSocket: {ws_target}\nVM: {VMX_PATH}")
         obs_trigger("bot_start")
         _reset_session_stats()
-        _append_event("BOT_START", "system", f"video_id={VIDEO_ID} vm={VMX_PATH}")
+        _append_event("BOT_START", "system", f"streamerbot_ws={ws_target} vm={VMX_PATH}")
         if _gui_app is not None:
             try:
-                _gui_app._append_chat_system(f"Bot started — listening on {VIDEO_ID}")
+                _gui_app._append_chat_system(f"Bot started — connected to Streamer.bot WebSocket on {ws_target}")
             except Exception:
                 pass
 
-        # Start scheduler background thread (one instance, idempotent)
         running_names = {t.name for t in threading.enumerate()}
         if "scheduler_loop" not in running_names:
-            threading.Thread(target=scheduler_loop, daemon=True,
-                             name="scheduler_loop").start()
-
-        self._bot_instance = None
-        self._bot_thread = threading.Thread(target=self._run_bot, daemon=True)
-        self._bot_thread.start()
-        threading.Thread(target=fetch_youtube_stats, daemon=True, name="youtube_stats").start()
+            threading.Thread(target=scheduler_loop, daemon=True, name="scheduler_loop").start()
 
     def _run_bot(self):
         try:
@@ -11037,11 +11050,13 @@ class UltraBotGUI:
 
     def _stop_bot(self):
         global TEST_MODE_ENABLED   # must be at the top of the function
-        if not self._bot_running and not TEST_MODE_ENABLED:
+        ws_running = bool(_streamerbot_ws_thread and _streamerbot_ws_thread.is_alive())
+        if not self._bot_running and not TEST_MODE_ENABLED and not ws_running:
             self._log("Bot is already stopped.")
             return
-        self._log("Stopping bot... (may take a few seconds to finish current loop)")
+        self._log("Stopping bot...")
         bot_stop_event.set()
+        stop_streamerbot_ws()
         # Reset test mode checkbox and global if it was active.
         # set(False) only updates the BooleanVar; it does NOT call _on_test_mode_toggle,
         # so the global must be cleared here manually.
@@ -16225,18 +16240,17 @@ if __name__ == '__main__':
             threading.Thread(target=_auto_start_flask, daemon=True).start()
 
         # ── If this instance was launched by the auto-update/hot-reload relaunch
-        #    pipeline (--autostart-everything), connect to the already-running
-        #    Streamer.bot WebSocket only. Do NOT call app._start_bot() here: that
-        #    creates a Pytchat YouTube connection, which must remain manual after
-        #    a restart.
+        #    pipeline (--autostart-everything), invoke the exact same Start Bot
+        #    handler used by the GUI button. Start Bot now connects to Streamer.bot
+        #    WebSocket and does not create a Pytchat connection.
         if _AUTOSTART_EVERYTHING:
             def _auto_start_everything():
                 time.sleep(1.0)
                 try:
-                    if start_streamerbot_ws():
-                        print("[AutoStart] Streamer.bot WebSocket connection started.")
+                    app._start_bot()
+                    print("[AutoStart] Invoked the Start Bot handler after relaunch.")
                 except Exception as e:
-                    print(f'[AutoStart] Streamer.bot WS startup failed: Python exception: "{traceback.format_exc()}"')
+                    print(f'[AutoStart] Start Bot startup failed: Python exception: "{traceback.format_exc()}"')
                 if REALPC_CONFIG.get("enabled"):
                     print("[AutoStart] NOTE: Real PC Control was enabled before this restart. "
                           "For safety it does NOT auto-resume -- go to the Real PC Control "
