@@ -3297,6 +3297,139 @@ def enqueue_log_line_for_yt_relay(text):
         except Exception:
             pass
 
+# ========================= STREAMER.BOT WEBSOCKET =========================
+STREAMERBOT_WS_CONFIG_FILE = "streamerbot_ws_config.json"
+STREAMERBOT_WS_CONFIG = {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "password": "",
+    "enabled": True,
+}
+_streamerbot_ws_stop = threading.Event()
+_streamerbot_ws_thread = None
+
+
+def load_streamerbot_ws_config():
+    global STREAMERBOT_WS_CONFIG
+    try:
+        if os.path.exists(STREAMERBOT_WS_CONFIG_FILE):
+            with open(STREAMERBOT_WS_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                STREAMERBOT_WS_CONFIG.update(data)
+    except Exception:
+        print(f'[Streamer.bot WS] Load error: Python exception: "{traceback.format_exc()}"')
+    try:
+        STREAMERBOT_WS_CONFIG["port"] = int(STREAMERBOT_WS_CONFIG.get("port", 8080))
+    except (TypeError, ValueError):
+        STREAMERBOT_WS_CONFIG["port"] = 8080
+
+
+def save_streamerbot_ws_config():
+    try:
+        safe_json_dump(STREAMERBOT_WS_CONFIG_FILE, STREAMERBOT_WS_CONFIG)
+    except Exception:
+        print(f'[Streamer.bot WS] Save error: Python exception: "{traceback.format_exc()}"')
+
+
+def _streamerbot_authentication(password, salt, challenge):
+    import base64
+    import hashlib
+    secret = base64.b64encode(
+        hashlib.sha256((password + salt).encode("utf-8")).digest()
+    ).decode("ascii")
+    return base64.b64encode(
+        hashlib.sha256((secret + challenge).encode("utf-8")).digest()
+    ).decode("ascii")
+
+
+def _streamerbot_ws_worker():
+    try:
+        import websocket
+    except ImportError:
+        print("[Streamer.bot WS] websocket-client is not installed. Run: pip install websocket-client")
+        return
+
+    while not _streamerbot_ws_stop.is_set():
+        ws = None
+        try:
+            host = str(STREAMERBOT_WS_CONFIG.get("host", "127.0.0.1")).strip() or "127.0.0.1"
+            port = int(STREAMERBOT_WS_CONFIG.get("port", 8080))
+            password = str(STREAMERBOT_WS_CONFIG.get("password", ""))
+            url = f"ws://{host}:{port}"
+            print(f"[Streamer.bot WS] Connecting to {url}...")
+            ws = websocket.create_connection(url, timeout=10)
+            ws.settimeout(1.0)
+
+            hello = json.loads(ws.recv())
+            auth = hello.get("authentication") or {}
+            if password and auth.get("salt") and auth.get("challenge"):
+                ws.send(json.dumps({
+                    "request": "Authenticate",
+                    "id": "vmware-bot-auth",
+                    "authentication": _streamerbot_authentication(
+                        password, auth["salt"], auth["challenge"]
+                    ),
+                }))
+                auth_response = json.loads(ws.recv())
+                if auth_response.get("status") not in (None, "ok", "OK", True):
+                    raise RuntimeError(f"authentication failed: {auth_response}")
+
+            # Subscribe to chat events. This connection is independent of Pytchat.
+            ws.send(json.dumps({
+                "request": "Subscribe",
+                "id": "vmware-bot-subscribe",
+                "events": {
+                    "Twitch": ["ChatMessage"],
+                    "YouTube": ["ChatMessage"],
+                },
+            }))
+            print("[Streamer.bot WS] Connected and subscribed to chat events.")
+
+            while not _streamerbot_ws_stop.is_set():
+                try:
+                    message = ws.recv()
+                    if message:
+                        # Keep the connection alive and expose events in the console.
+                        # Pytchat remains stopped during auto-restart.
+                        data = json.loads(message)
+                        if data.get("event"):
+                            print(f"[Streamer.bot WS] Event: {data.get('event')}")
+                except Exception as e:
+                    if "timed out" not in str(e).lower() and "timeout" not in str(e).lower():
+                        raise
+        except Exception as e:
+            if not _streamerbot_ws_stop.is_set():
+                print(f'[Streamer.bot WS] Connection error: {e}')
+                if _streamerbot_ws_stop.wait(5):
+                    break
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+
+def start_streamerbot_ws():
+    global _streamerbot_ws_thread
+    if not STREAMERBOT_WS_CONFIG.get("enabled", True):
+        print("[Streamer.bot WS] Disabled in configuration.")
+        return False
+    if _streamerbot_ws_thread and _streamerbot_ws_thread.is_alive():
+        return True
+    _streamerbot_ws_stop.clear()
+    _streamerbot_ws_thread = threading.Thread(
+        target=_streamerbot_ws_worker, daemon=True, name="streamerbot_ws"
+    )
+    _streamerbot_ws_thread.start()
+    return True
+
+
+def stop_streamerbot_ws():
+    _streamerbot_ws_stop.set()
+
+
 # ========================= SOUND & TTS CONFIG =========================
 SOUND_CONFIG_FILE = "sound_config.json"
 SOUND_CONFIG = {
@@ -8918,17 +9051,28 @@ class UltraBotGUI:
         tk.Label(card, text="Streamer.bot WS Port", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
                  row=0, column=0, sticky="w", padx=(0,8))
-        self._yt_var = tk.StringVar()
+        self._yt_var = tk.StringVar(value=str(STREAMERBOT_WS_CONFIG.get("port", 8080)))
         yt_entry = ttk.Entry(card, textvariable=self._yt_var, width=32,
                              font=("Segoe UI Mono", 10))
         yt_entry.grid(row=0, column=1, sticky="ew", padx=(0,12), ipady=4)
         tk.Label(card, text="WS Password", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
                  row=0, column=2, sticky="w", padx=(0,8))
-        self._sb_pass_var = tk.StringVar()
+        self._sb_pass_var = tk.StringVar(value=str(STREAMERBOT_WS_CONFIG.get("password", "")))
         sb_pass_entry = ttk.Entry(card, textvariable=self._sb_pass_var, width=20,
                                   font=("Segoe UI Mono", 10), show="*")
         sb_pass_entry.grid(row=0, column=3, sticky="ew", padx=(0,12), ipady=4)
+
+        def _save_streamerbot_fields(*_):
+            try:
+                STREAMERBOT_WS_CONFIG["port"] = int(self._yt_var.get().strip() or 8080)
+            except (TypeError, ValueError):
+                return
+            STREAMERBOT_WS_CONFIG["password"] = self._sb_pass_var.get()
+            save_streamerbot_ws_config()
+
+        self._yt_var.trace_add("write", _save_streamerbot_fields)
+        self._sb_pass_var.trace_add("write", _save_streamerbot_fields)
 
 
         # Twitch channel (via Streamer.bot)
@@ -16028,6 +16172,7 @@ if __name__ == '__main__':
         load_event_log()
         load_permissions_config()
         load_yt_log_relay_config()
+        load_streamerbot_ws_config()
         if YT_LOG_RELAY_CONFIG.get("enabled"):
             start_yt_log_relay_worker()
         load_host_switch_config()
@@ -16080,25 +16225,18 @@ if __name__ == '__main__':
             threading.Thread(target=_auto_start_flask, daemon=True).start()
 
         # ── If this instance was launched by the auto-update/hot-reload relaunch
-        #    pipeline (--autostart-everything), self-start the bot from video_id.json
-        #    with no one at the keyboard. Extra streams and VNC resume automatically
-        #    as part of that (they read their own already-persisted config files).
-        #    Real PC Control deliberately does NOT auto-resume -- see the note below. ──
+        #    pipeline (--autostart-everything), connect to the already-running
+        #    Streamer.bot WebSocket only. Do NOT call app._start_bot() here: that
+        #    creates a Pytchat YouTube connection, which must remain manual after
+        #    a restart.
         if _AUTOSTART_EVERYTHING:
             def _auto_start_everything():
                 time.sleep(1.0)
                 try:
-                    vid_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "video_id.json")
-                    with open(vid_path, "r", encoding="utf-8") as f:
-                        vid = json.load(f).get("video_id", "")
-                    if vid:
-                        app._yt_var.set(vid)
-                        app._start_bot()
-                        print(f"[AutoStart] Self-started bot on video ID {vid} from video_id.json.")
-                    else:
-                        print("[AutoStart] video_id.json had no video_id -- start the bot manually.")
+                    if start_streamerbot_ws():
+                        print("[AutoStart] Streamer.bot WebSocket connection started.")
                 except Exception as e:
-                    print(f'[AutoStart] Could not self-start from video_id.json: Python exception: "{traceback.format_exc()}"')
+                    print(f'[AutoStart] Streamer.bot WS startup failed: Python exception: "{traceback.format_exc()}"')
                 if REALPC_CONFIG.get("enabled"):
                     print("[AutoStart] NOTE: Real PC Control was enabled before this restart. "
                           "For safety it does NOT auto-resume -- go to the Real PC Control "
