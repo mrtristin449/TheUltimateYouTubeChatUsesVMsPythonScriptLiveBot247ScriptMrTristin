@@ -13,7 +13,7 @@ import sys
 import platform
 
 # ========================= LOGGING SETUP =========================
-# Log all output to log.txt for debugging
+# Log all output to log.txt for debugging gg
 import logging
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log.txt")
 logging.basicConfig(
