@@ -8962,7 +8962,9 @@ class UltraBotGUI:
         # Register a new .vmx (vmrun has no "list all VMs" command, so VMs are
         # registered locally in vms.json — alias is just a friendly label).
         reg_row = tk.Frame(card, bg=self.BG2)
-        reg_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(22, 0))
+        # Keep this row below the Host Switch Sync controls (rows 6-7); using row 6
+        # here made the registration widgets overlap the Host Switch label/checkbox.
+        reg_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(22, 0))
         tk.Label(reg_row, text="Register VM — Alias:", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 8)).pack(side="left")
         self._reg_alias_var = tk.StringVar()
