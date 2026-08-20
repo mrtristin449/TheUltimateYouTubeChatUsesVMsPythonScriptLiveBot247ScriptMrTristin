@@ -13,7 +13,7 @@ import sys
 import platform
 
 # ========================= LOGGING SETUP =========================
-# Log all output to log.txt for debugging gg
+# Log all output to log.txt for debugging
 import logging
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log.txt")
 logging.basicConfig(
@@ -4238,6 +4238,41 @@ def _video_panel_window_title():
         return None
     ready.wait(2)
     return result.get("title")
+
+def obs_refresh_browser_source(source_name: str = "chat") -> bool:
+    """Refresh an OBS Browser source through OBS WebSocket.
+
+    Streamer.bot chat is written into the Flask overlay endpoint, so the browser
+    source must be refreshed after Flask comes back during a relaunch. OBS's
+    Browser source exposes this as the ``refreshnocache`` properties button.
+    """
+    if not _obs_connected or not _obs_client or not source_name:
+        return False
+    try:
+        method = getattr(_obs_client, "press_input_properties_button", None)
+        if method is not None:
+            try:
+                method(source_name, "refreshnocache")
+            except TypeError:
+                method(input_name=source_name, property_name="refreshnocache")
+        else:
+            # Compatibility fallback for obsws-python versions that expose the
+            # raw request sender but not the convenience method.
+            sender = getattr(_obs_client, "send", None)
+            if sender is None:
+                sender = getattr(getattr(_obs_client, "base_client", None), "send", None)
+            if sender is None:
+                raise RuntimeError("obsws-python has no PressInputPropertiesButton sender")
+            sender("PressInputPropertiesButton", {
+                "inputName": source_name,
+                "propertyName": "refreshnocache",
+            })
+        print(f"[OBS] Browser source '{source_name}' refreshed")
+        return True
+    except Exception:
+        print(f'[OBS] Could not refresh browser source "{source_name}": Python exception: "{traceback.format_exc()}"')
+        return False
+
 
 def obs_update_video_window_capture(source_name: str = "video") -> bool:
     """Tell OBS to point its Window Capture source at the Video Panel window.
@@ -16407,10 +16442,18 @@ if __name__ == '__main__':
                         print(f'[AutoStart] Video Panel relaunch restore failed: Python exception: "{traceback.format_exc()}"')
 
                 # ── Re-start Flask on its previous port if it was running ──
+                # The chat Browser source is refreshed only after Flask is back,
+                # so its /chat endpoint is available when OBS reloads it.
                 if _LAUNCH_FLASK_PORT is not None:
                     try:
                         ok, msg = start_flask_server(_LAUNCH_FLASK_PORT)
                         print(f"[AutoStart] Flask re-started on port {_LAUNCH_FLASK_PORT}: {msg}")
+                        if ok and OBS_CONFIG.get("enabled", False):
+                            time.sleep(2.0)
+                            if obs_refresh_browser_source("chat"):
+                                print("[AutoStart] OBS chat browser source refreshed after Flask connected.")
+                            else:
+                                print("[AutoStart] Could not refresh OBS chat browser source (OBS not connected or source missing).")
                     except Exception:
                         print(f'[AutoStart] Flask re-start failed: Python exception: "{traceback.format_exc()}"')
 
