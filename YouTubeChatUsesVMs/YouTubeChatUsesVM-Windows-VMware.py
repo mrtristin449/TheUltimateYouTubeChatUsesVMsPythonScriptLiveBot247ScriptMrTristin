@@ -3448,6 +3448,7 @@ def _handle_streamerbot_chat(chat_item):
                 user, msg, is_owner=is_owner, is_command=msg.startswith("!"),
                 is_banned=(user in banned_users and time.time() < banned_users.get(user, 0)),
                 is_mod=is_mod,
+                platform=chat_item.get("platform", ""),
             )
         except Exception:
             pass
@@ -7931,6 +7932,7 @@ class YouTubeChatBot:
                                 is_command=_is_cmd,
                                 is_banned=_is_banned_,
                                 is_mod=is_mod,
+                                platform="youtube",
                             )
                         except Exception:
                             pass
@@ -9654,6 +9656,8 @@ class UltraBotGUI:
         self._chat_viewer.tag_configure("ts",      foreground=self.TEXTDIM, font=("Segoe UI", 8))
         self._chat_viewer.tag_configure("system",  foreground=self.ACCENT2, font=("Segoe UI", 8, "italic"))
         self._chat_viewer.tag_configure("mod",     foreground=self.SHIELD_BLUE, font=("Segoe UI", 9, "bold"))
+        self._chat_viewer.tag_configure("platform_twitch", foreground="#9146FF", font=("Segoe UI", 9, "bold"))
+        self._chat_viewer.tag_configure("platform_youtube", foreground="#FF0000", font=("Segoe UI", 9, "bold"))
 
         # Create a small blue circle image for moderator usernames in the chat viewer.
         try:
@@ -9716,13 +9720,23 @@ class UltraBotGUI:
             pass
 
     def _append_chat(self, user: str, msg: str, is_owner: bool = False,
-                     is_command: bool = False, is_banned: bool = False, is_mod: bool = False):
-        """Append a chat message to the Live Chat Viewer widget (thread-safe)."""
+                     is_command: bool = False, is_banned: bool = False, is_mod: bool = False,
+                     platform: str = ""):
+        """Append a chat message to the Live Chat Viewer widget (thread-safe).
+
+        ``platform`` is ``twitch`` or ``youtube`` for Streamer.bot/YouTube
+        messages. The marker is kept separate from the username styling so
+        owner, moderator, VIP, and banned colors still work normally."""
         def _do():
             try:
                 ts   = time.strftime("%H:%M:%S")
                 self._chat_viewer.configure(state="normal")
                 self._chat_viewer.insert("end", f"[{ts}] ", "ts")
+                platform_key = str(platform or "").strip().lower()
+                if platform_key == "twitch":
+                    self._chat_viewer.insert("end", "T ", "platform_twitch")
+                elif platform_key in ("youtube", "yt"):
+                    self._chat_viewer.insert("end", "▶ ", "platform_youtube")
                 if is_banned:
                     self._chat_viewer.insert("end", f"{user}", "banned")
                 elif is_owner:
