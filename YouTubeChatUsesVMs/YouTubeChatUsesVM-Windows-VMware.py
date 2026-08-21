@@ -6,7 +6,6 @@ import threading
 import tkinter as tk
 
 # Keep the module available under the existing alias used elsewhere in this file as well.
-# test auto update brb
 _threading_module = threading
 import tkinter.font as tkfont
 import os
@@ -3477,7 +3476,7 @@ def _handle_streamerbot_chat(chat_item):
                 continue
             _global_command_cooldowns[user] = time.time()
         _record_command(cmd, user)
-        ok, result = run_single_bot_command(command_line)
+        ok, result = run_single_bot_command(command_line, username=user, is_mod=is_mod, is_owner=is_owner)
         print(f"[Streamer.bot Command] {user}: {result}")
 
 
@@ -3976,16 +3975,15 @@ def _global_exception_handler(exc_type, exc_value, exc_tb):
 sys.excepthook = _global_exception_handler
 
 
-def run_single_bot_command(line):
-    """Executes one "!cmd args" line exactly as the chat loop or test mode console
-    would -- OS-voting triggers, custom commands, then built-in commands (!type,
-    !send, !click, !combo, !key, etc.). Returns (ok: bool, message: str) instead of
-    printing directly, so callers (test mode's stdin loop, the GUI's Admin CMD box,
-    anything else) can each show the result wherever makes sense for them, rather
-    than this function assuming it's always talking to a terminal.
-    Does NOT handle !quit/!exit/!stop -- those are test-mode-console-specific and
-    stay in run_test_mode()'s own loop, since "stop test mode" isn't a sensible
-    action to trigger from, say, the Admin CMD box."""
+def run_single_bot_command(line, username="admin", is_mod=True, is_owner=True):
+    """Execute the complete Help-tab command set for console and Streamer.bot chat.
+
+    This is intentionally the shared dispatcher: Streamer.bot must not use a
+    reduced command list while the legacy YouTube path uses the full one."""
+    global CHAT_COMMANDS_PAUSED, restart_start_time, revert_start_time
+    global restart_in_progress, revert_in_progress, restart_cooldown_until, revert_cooldown_until
+    global os_vote_start_time
+
     line = line.strip()
     if not line.startswith("!"):
         return False, "Commands must start with '!' — e.g. !type hello"
@@ -4007,10 +4005,12 @@ def run_single_bot_command(line):
     if trigger in custom_commands:
         threading.Thread(target=execute_custom_command, args=(trigger,), daemon=True).start()
         return True, f"Running custom command {trigger}"
+    if try_handle_host_switch_command(cmd):
+        return True, f"Host-switch command handled: !{cmd}"
 
     # Built-in commands
     try:
-        if cmd in ("type", "text", "say"):
+        if cmd in ("type", "text", "say", "t", "s"):
             send_keyboard(args)
         elif cmd in ("send", "sendenter", "typeenter", "sendline"):
             send_keyboard(args)
@@ -4018,7 +4018,7 @@ def run_single_bot_command(line):
             send_special_enter()
         elif cmd == "enter":
             send_special_enter()
-        elif cmd in ("key", "press"):
+        elif cmd in ("key", "press", "k"):
             k = args.lower().strip()
             if k in SCANCODES:
                 vnc_key_down(k)
@@ -4026,17 +4026,26 @@ def run_single_bot_command(line):
                 vnc_key_up(k)
             else:
                 send_keyboard(k)
-        elif cmd in ("combo", "chord", "multi"):
+        elif cmd in ("combo", "chord", "multi", "c"):
             keys = parse_combo_keys(args)
             if keys:
                 send_combo(keys)
-        elif cmd in ("click", "lclick", "rclick", "rightclick",
-                     "mclick", "middleclick", "move", "mouse", "mv",
-                     "abs", "cursor", "moveabs", "drag", "dragrel",
-                     "dragabs", "drag_absolute", "scroll", "wheel"):
+        elif cmd in ("click", "lclick", "lc", "rclick", "rightclick", "rc",
+                     "dclick", "tripleclick", "mclick", "middleclick", "move", "mouse", "mv", "m",
+                     "abs", "cursor", "moveabs", "drag", "dragrel", "d",
+                     "dragabs", "drag_absolute", "scroll", "wheel", "scrollup", "scrolldown"):
             handle_mouse(cmd, args)
-        elif cmd in ("startvm", "launchvm"):
+        elif cmd in ("startvm", "modlaunch", "launchvm", "start_mc", "startmc"):
             start_vm()
+        elif cmd in ("keydown", "hold", "kd"):
+            k = args.lower().strip()
+            if k in SCANCODES: vnc_key_down(k)
+        elif cmd in ("keyup", "release", "ku"):
+            k = args.lower().strip()
+            if k in SCANCODES: vnc_key_up(k)
+        elif cmd == "winkey":
+            k = args.lower().strip()
+            if k: send_combo(["win"] + parse_combo_keys(k))
         elif cmd in ("restartvm", "restart"):
             speak_text("Restarting Virtual Machine...")
             update_status("Restarting...")
@@ -4068,13 +4077,193 @@ def run_single_bot_command(line):
         elif cmd in ("restore", "focus", "front"):
             restore_window()
         elif cmd == "run":
-            send_combo(["win", "r"])
-        elif cmd in ("wait", "pause", "delay"):
+            if args.strip():
+                run_win_r(args.strip())
+            else:
+                send_combo(["win", "r"])
+        elif cmd == "cmd":
+            run_admin_cmd(args)
+        elif cmd in ("dir", "openfolder"):
+            open_folder(args)
+        elif cmd in ("openfile", "file"):
+            open_file(args)
+        elif cmd in ("taskkill", "kill"):
+            if args.strip(): taskkill_process(args.strip())
+        elif cmd in ("fullscreen", "fs"):
+            print("[Bot] Fullscreen hint (manual)")
+        elif cmd in ("wait", "pause", "delay", "w", "sleep"):
             try:
-                delay = max(0, min(float(args), 5.0))
-                time.sleep(delay)
+                time.sleep(max(0, min(float(args), 10.0)))
             except ValueError:
                 pass
+        elif cmd in ("play", "music", "songrequest", "sr"):
+            if args.strip():
+                threading.Thread(target=queue_song_request, args=(args, username), kwargs={"is_mod": is_mod}, daemon=True).start()
+            else:
+                threading.Thread(target=start_music_player, daemon=True).start()
+        elif cmd in ("findsr",):
+            if args.strip():
+                def _findsr(q=args):
+                    vid = find_youtube_video_id(q)
+                    if vid:
+                        queue_song_request(vid, username, is_mod=is_mod)
+                    else:
+                        console_log("INFO", f"[findsr] no result for '{q}'")
+                threading.Thread(target=_findsr, daemon=True).start()
+        elif cmd in ("musicskip", "skipsong", "skipmusic"):
+            threading.Thread(target=music_skip_track, daemon=True).start()
+        elif cmd in ("stopmusic", "musicstop"):
+            threading.Thread(target=music_stop_current, daemon=True).start()
+        elif cmd in ("musicpause", "pausemusic"):
+            threading.Thread(target=music_pause_toggle, daemon=True).start()
+        elif cmd in ("musicvolume", "musicvol"):
+            music_set_volume(float(args))
+        elif cmd in ("video", "videorequest", "vr"):
+            if args.strip():
+                threading.Thread(target=queue_video_request, args=(args, username), kwargs={"is_mod": is_mod}, daemon=True).start()
+            else:
+                threading.Thread(target=start_video_player, daemon=True).start()
+        elif cmd in ("findvr",):
+            if args.strip():
+                def _findvr(q=args):
+                    vid = find_youtube_video_id(q)
+                    if vid:
+                        queue_video_request(vid, username, is_mod=is_mod)
+                    else:
+                        console_log("INFO", f"[findvr] no result for '{q}'")
+                threading.Thread(target=_findvr, daemon=True).start()
+        elif cmd in ("videoskip", "skipvideo", "vskip"):
+            threading.Thread(target=video_skip_track, daemon=True).start()
+        elif cmd in ("stopvideo", "videostop"):
+            threading.Thread(target=video_stop_current, daemon=True).start()
+        elif cmd in ("videopause", "pausevideo"):
+            threading.Thread(target=video_pause_toggle, daemon=True).start()
+        elif cmd in ("videovolume", "videovol"):
+            video_set_volume(float(args))
+        elif cmd in ("sb", "soundboard"):
+            if args.strip(): threading.Thread(target=soundboard_web_search_and_play, args=(args, username), daemon=True).start()
+        elif cmd == "sbid":
+            if args.strip(): threading.Thread(target=soundboard_web_id_and_play, args=(args, username), daemon=True).start()
+        elif cmd in ("sbstop", "soundboardstop"):
+            threading.Thread(target=soundboard_stop_all, daemon=True).start()
+        elif cmd in ("sbvolume", "sbvol"):
+            soundboard_set_volume(float(args))
+        elif cmd == "srqueue":
+            threading.Thread(target=post_queue_to_overlay, args=("Song Queue", music_song_requests, music_queue), daemon=True).start()
+        elif cmd == "vrqueue":
+            threading.Thread(target=post_queue_to_overlay, args=("Video Queue", video_requests, video_queue), daemon=True).start()
+        elif cmd == "skipsr":
+            music_skip_track()
+        elif cmd == "clearsr":
+            music_song_requests.clear()
+        elif cmd == "skipvr":
+            video_skip_track()
+        elif cmd == "clearvr":
+            video_requests.clear()
+        elif cmd in ("restrictmedia", "restrictsrvr", "restrictrequests", "srvrmode"):
+            if args.strip().lower() in ("on", "1", "true", "enable"):
+                set_media_request_restriction(True)
+            elif args.strip().lower() in ("off", "0", "false", "disable"):
+                set_media_request_restriction(False)
+            else:
+                set_media_request_restriction(not MEDIA_REQUEST_RESTRICTED)
+        elif cmd in ("tts", "ttsxp"):
+            speak_text(args)
+        elif cmd in ("ttsloop", "ttsxploop"):
+            if args.strip(): tts_loop(args, xp_style=cmd == "ttsxploop")
+        elif cmd == "gtts":
+            if args.strip(): threading.Thread(target=gtts_speak, args=(args,), daemon=True).start()
+        elif cmd == "beep":
+            threading.Thread(target=beep, daemon=True).start()
+        elif cmd == "shutdown":
+            threading.Thread(target=vm_shutdown_soft, daemon=True).start()
+        elif cmd in ("killvm", "forceshutdown"):
+            threading.Thread(target=vm_shutdown_hard_kill, daemon=True).start()
+        elif cmd == "forcefixvm":
+            threading.Thread(target=watchdog_restart, daemon=True).start()
+        elif cmd == "pausevm":
+            threading.Thread(target=vm_pause, daemon=True).start()
+        elif cmd == "resumevm":
+            threading.Thread(target=vm_unpause, daemon=True).start()
+        elif cmd == "vmsavestate":
+            threading.Thread(target=vm_save_state, daemon=True).start()
+        elif cmd == "vmstatus":
+            post_system_message(cmd_status_text())
+        elif cmd in ("makesnapshot", "snapshot"):
+            threading.Thread(target=vm_make_snapshot, args=(args,), daemon=True).start()
+        elif cmd in ("enableinternet", "disableinternet"):
+            ok, result = vm_set_internet_live(cmd == "enableinternet")
+            post_system_message(f"[{cmd}] {result}")
+        elif cmd == "roll":
+            post_system_message(f"[roll] rolled {random.randint(1, 100)}")
+        elif cmd == "coinflip":
+            post_system_message(f"[coinflip] {random.choice(['heads', 'tails'])}")
+        elif cmd == "shake": mouse_shake()
+        elif cmd == "jiggle": mouse_jiggle()
+        elif cmd == "circle": mouse_circle()
+        elif cmd == "spiral": mouse_spiral()
+        elif cmd == "msgbox":
+            if args.strip(): msgbox_in_vm(args)
+        elif cmd == "spam":
+            sp = args.rsplit(maxsplit=1)
+            spam_text(sp[0], sp[1]) if len(sp) == 2 and sp[1].isdigit() else spam_text(args, 5)
+        elif cmd == "countdown": countdown(int(args) if args.strip().isdigit() else 5)
+        elif cmd == "matrix": matrix_effect()
+        elif cmd == "colorscheme": randomize_colorscheme()
+        elif cmd == "rainbow": rainbow_effect()
+        elif cmd == "notepadflood": notepad_flood(int(args) if args.strip().isdigit() else 6)
+        elif cmd == "exeflood": exe_flood(int(args) if args.strip().isdigit() else 6)
+        elif cmd == "txtflood": txt_flood(int(args) if args.strip().isdigit() else 20)
+        elif cmd == "deskflood": desktop_flood()
+        elif cmd == "ping": post_system_message("pong!")
+        elif cmd == "uptime": post_system_message(cmd_uptime_text())
+        elif cmd == "help": post_system_message(COMMANDS_HELP.strip()[:400])
+        elif cmd == "stats": post_system_message(cmd_stats_text())
+        elif cmd == "history": post_system_message(cmd_history_text())
+        elif cmd == "leaderboard": post_system_message(cmd_leaderboard_text())
+        elif cmd == "queue": post_system_message(cmd_queue_text())
+        elif cmd == "status": post_system_message(cmd_status_text())
+        elif cmd in ("pausechat", "disablechat"):
+            CHAT_COMMANDS_PAUSED = True
+            post_system_message("[pausechat] chat commands paused.")
+        elif cmd == "enablechat":
+            CHAT_COMMANDS_PAUSED = False
+            post_system_message("[enablechat] chat commands resumed.")
+        elif cmd == "enablecv":
+            post_system_message("[enablecv] no OCR/computer-vision module is present in this build.")
+        elif cmd == "efail":
+            log_error("Cmd/efail", "manual test error", "triggered via !efail")
+            update_status("ERROR (test)")
+        elif cmd == "poweroff":
+            post_system_message("[poweroff] shutting down HOST machine...")
+            threading.Thread(target=lambda: subprocess.run(["shutdown", "/s", "/t", "5"]), daemon=True).start()
+        elif cmd == "ban":
+            target = args.strip().lstrip("@").split()[0].lower() if args.strip() else ""
+            if target:
+                banned_users[target] = time.time() + PERMISSIONS_CONFIG.get("ban_duration", 300)
+                post_system_message(f"[ban] {target} banned.")
+        elif cmd == "votestop":
+            vote_restart.clear(); vote_revert.clear(); ban_votes.clear()
+            post_system_message("[votestop] active vote(s) cancelled.")
+        elif cmd == "clear":
+            overlay_data["chat"].clear(); seen_message_ids.clear()
+        elif cmd == "clearvotes":
+            vote_restart.clear(); vote_revert.clear(); ban_votes.clear(); os_votes.clear()
+            restart_start_time = None; revert_start_time = None; os_vote_start_time = None
+            post_system_message("[clearvotes] votes cleared.")
+        elif cmd == "votehelp":
+            update_status("Commands in description!")
+        elif cmd in ("restart", "restartvm"):
+            speak_text("Restarting Virtual Machine...")
+            update_status("Restarting...")
+            _checked(vm_reset(VMX_PATH, current_vm_backend))
+            update_status("Running"); play_success_sound(); obs_trigger("restart_done")
+        elif cmd == "revert":
+            speak_text("Reverting Virtual Machine...")
+            _checked(vm_stop(VMX_PATH, current_vm_backend, hard=True)); time.sleep(3)
+            _checked(vm_revert_to_snapshot(VMX_PATH, SNAPSHOT_NAME, current_vm_backend)); time.sleep(3)
+            _checked(vm_start(VMX_PATH, current_vm_backend, gui=True)); update_status("Running")
+            play_success_sound(); obs_trigger("revert_done")
         else:
             return False, f"Unknown command: !{cmd}"
         return True, f"OK: !{cmd} {args}"
@@ -4250,12 +4439,33 @@ def obs_refresh_browser_source(source_name: str = "chat") -> bool:
     if not _obs_connected or not _obs_client or not source_name:
         return False
     try:
+        # OBS may report a Browser source as a scene item rather than an input
+        # in the current canvas. Resolve the existing input first, preserving the
+        # exact configured source name `chat` and avoiding any new OBS config.
+        resolved_name = source_name
+        try:
+            input_list = _obs_client.get_input_list()
+            inputs = getattr(input_list, "inputs", None) or []
+            names = []
+            for item in inputs:
+                if isinstance(item, dict):
+                    name = item.get("inputName") or item.get("input_name") or item.get("name")
+                else:
+                    name = getattr(item, "input_name", None) or getattr(item, "inputName", None) or getattr(item, "name", None)
+                if name:
+                    names.append(str(name))
+            exact = next((n for n in names if n == source_name), None)
+            folded = next((n for n in names if n.casefold() == source_name.casefold()), None)
+            resolved_name = exact or folded or source_name
+        except Exception:
+            pass
+
         method = getattr(_obs_client, "press_input_properties_button", None)
         if method is not None:
             try:
-                method(source_name, "refreshnocache")
+                method(resolved_name, "refreshnocache")
             except TypeError:
-                method(input_name=source_name, property_name="refreshnocache")
+                method(input_name=resolved_name, property_name="refreshnocache")
         else:
             # Compatibility fallback for obsws-python versions that expose the
             # raw request sender but not the convenience method.
@@ -4265,10 +4475,10 @@ def obs_refresh_browser_source(source_name: str = "chat") -> bool:
             if sender is None:
                 raise RuntimeError("obsws-python has no PressInputPropertiesButton sender")
             sender("PressInputPropertiesButton", {
-                "inputName": source_name,
+                "inputName": resolved_name,
                 "propertyName": "refreshnocache",
             })
-        print(f"[OBS] Browser source '{source_name}' refreshed")
+        print(f"[OBS] Browser source '{resolved_name}' refreshed")
         return True
     except Exception:
         print(f'[OBS] Could not refresh browser source "{source_name}": Python exception: "{traceback.format_exc()}"')
@@ -16463,6 +16673,26 @@ if __name__ == '__main__':
                                 print("[AutoStart] Could not refresh OBS Browser source 'chat' (OBS not connected or source missing).")
                     except Exception:
                         print(f'[AutoStart] Flask re-start failed: Python exception: "{traceback.format_exc()}"')
+
+                # ── Reset enabled media players after relaunch ──
+                # This deliberately follows the same sequence as clicking each
+                # player toggle off and back on: stop/disable first, then start/
+                # enable again. Disabled players remain disabled.
+                try:
+                    if video_config.get("enabled", False):
+                        stop_video_player()
+                        print("[info] video player disabled.")
+                        time.sleep(0.25)
+                        start_video_player()
+                        print("[info] video player enabled.")
+                    if music_config.get("enabled", False):
+                        stop_music_player()
+                        print("[info] music player disabled.")
+                        time.sleep(0.25)
+                        start_music_player()
+                        print("[info] music player enabled.")
+                except Exception:
+                    print(f'[AutoStart] Media player relaunch reset failed: Python exception: "{traceback.format_exc()}"')
 
             threading.Thread(target=_auto_start_everything, daemon=True).start()
 
