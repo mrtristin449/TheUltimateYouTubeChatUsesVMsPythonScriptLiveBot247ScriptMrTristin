@@ -15,6 +15,7 @@ import platform
 # ========================= LOGGING SETUP =========================
 # Log all output to log.txt for debugging
 import logging
+import py_compile
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log.txt")
 logging.basicConfig(
     level=logging.DEBUG,
@@ -3981,6 +3982,109 @@ def _global_exception_handler(exc_type, exc_value, exc_tb):
 sys.excepthook = _global_exception_handler
 
 
+
+# ========================= MODERATOR SCRIPT RESTART / GROQ REPAIR =========================
+def _saved_groq_repair_key():
+    """Return a configured Groq key, preferring the Permissions value if present."""
+    for cfg in (PERMISSIONS_CONFIG, MRTRISTINAI_CONFIG, globals().get("gemini_config", {})):
+        key = str((cfg or {}).get("groq_api_key", "") or "").strip()
+        if key:
+            return key
+    return ""
+
+def _groq_repair_from_full_log():
+    """Ask Groq for exact source edits, validate them in a temporary copy, then install.
+
+    The model may only return exact find/replace operations. No model-generated Python
+    is executed directly; the candidate file must compile before the original is replaced.
+    """
+    key = _saved_groq_repair_key()
+    if not key:
+        print("[RestartScript] No saved Groq API key found; relaunching without automatic repair.")
+        return False
+    script_path = os.path.abspath(sys.argv[0])
+    base_path = os.path.join(os.path.dirname(script_path), "YouTubeChatUsesVM-Windows-VMware.py")
+    if not os.path.exists(base_path):
+        base_path = script_path
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            log_text = f.read()
+        # Keep the full available log, but cap an accidentally unbounded historical file.
+        if len(log_text) > 400000:
+            log_text = log_text[-400000:]
+        with open(base_path, "r", encoding="utf-8", errors="replace") as f:
+            source = f.read()
+        prompt = (
+            "You are repairing a Windows Python livestream bot. Analyze the complete log "
+            "below and propose only minimal exact source edits for errors that are clearly "
+            "caused by this bot. Return JSON only with this shape: "
+            "{\\\"patches\\\":[{\\\"find\\\":\\\"exact existing text\\\","
+            "\\\"replace\\\":\\\"replacement text\\\"}],\\\"summary\\\":\\\"...\\\"}. "
+            "If no safe repair is clear, return an empty patches array. Never add or modify "
+            "credentials, download/execute code, shell commands, permissions, or unrelated "
+            "files. Keep patches <= 8 and each exact find/replace <= 12000 characters.\n\n"
+            "SOURCE:\n" + source + "\n\nFULL LOG:\n" + log_text
+        )
+        body = json.dumps({
+            "model": MRTRISTINAI_CONFIG.get("model", "llama-3.3-70b-versatile"),
+            "temperature": 0,
+            "max_tokens": 6000,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": "Return valid JSON only. Be conservative."},
+                {"role": "user", "content": prompt},
+            ],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            GROQ_CHAT_COMPLETIONS_URL, data=body,
+            headers={**GROQ_REQUEST_HEADERS, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        content = result["choices"][0]["message"]["content"]
+        proposal = json.loads(content)
+        patches = proposal.get("patches", [])
+        if not isinstance(patches, list) or len(patches) > 8:
+            raise ValueError("Groq returned an invalid patch list")
+        candidate = source
+        for patch in patches:
+            if not isinstance(patch, dict): raise ValueError("invalid patch item")
+            find, replace = patch.get("find"), patch.get("replace")
+            if not isinstance(find, str) or not isinstance(replace, str) or not find:
+                raise ValueError("invalid patch text")
+            if len(find) > 12000 or len(replace) > 12000 or candidate.count(find) != 1:
+                raise ValueError("patch is not an exact single match")
+            candidate = candidate.replace(find, replace, 1)
+        if not patches:
+            print(f"[RestartScript] Groq found no safe source repair: {proposal.get('summary', '')}")
+            return False
+        tmp = base_path + ".groq_candidate.py"
+        backup = base_path + ".before_groq_repair.bak"
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(candidate)
+        py_compile.compile(tmp, doraise=True)
+        shutil.copy2(base_path, backup)
+        os.replace(tmp, base_path)
+        print(f"[RestartScript] Groq applied {len(patches)} compile-checked patch(es); backup: {backup}")
+        print(f"[RestartScript] Groq summary: {proposal.get('summary', '')}")
+        return True
+    except Exception:
+        try:
+            if os.path.exists(base_path + ".groq_candidate.py"):
+                os.remove(base_path + ".groq_candidate.py")
+        except Exception: pass
+        print(f'[RestartScript] Groq repair skipped: Python exception: "{traceback.format_exc()}"')
+        return False
+
+def _restart_script_as_moderator():
+    """Analyze the full log when possible, then invoke the normal relaunch pipeline."""
+    try:
+        _groq_repair_from_full_log()
+    finally:
+        trigger_relaunch_pipeline("Moderator requested !restartscript")
+
+
 def run_single_bot_command(line, username="admin", is_mod=True, is_owner=True):
     """Execute the complete Help-tab command set for console and Streamer.bot chat.
 
@@ -4013,6 +4117,15 @@ def run_single_bot_command(line, username="admin", is_mod=True, is_owner=True):
         return True, f"Running custom command {trigger}"
     if try_handle_host_switch_command(cmd):
         return True, f"Host-switch command handled: !{cmd}"
+
+    # Moderator-only script relaunch. This intentionally runs in a background
+    # thread because Groq analysis can take several seconds before relaunch.
+    if cmd in ("restartscript", "restart_script"):
+        if not (is_mod or is_owner):
+            return False, "!restartscript is moderator-only"
+        threading.Thread(target=_restart_script_as_moderator, daemon=True,
+                         name="moderator_restartscript").start()
+        return True, "Moderator restart requested; checking the full log before relaunch."
 
     # Built-in commands
     try:
@@ -6562,6 +6675,10 @@ auto_resume_media = {
 }
 _auto_resume_stop = threading.Event()
 _auto_resume_thread = None
+# One-shot relaunch resume requests consumed by the normal player loops. This
+# avoids starting a second VLC player from a separate resume thread.
+_auto_resume_pending = {"music": None, "video": None}
+_auto_resume_not_before = {"music": 0.0, "video": 0.0}
 
 def _load_auto_resume_media():
     try:
@@ -6872,10 +6989,39 @@ def music_player_loop():
         time.sleep(1)
     while (not bot_stop_event.is_set()) and not music_stop_event.is_set():
         with music_lock:
-            pending = music_song_requests.pop(0) if music_song_requests else None
+            resume_pending = _auto_resume_pending.get("music")
+            resume_ready = time.time() >= _auto_resume_not_before.get("music", 0.0)
+            if resume_pending and resume_ready:
+                _auto_resume_pending["music"] = None
+            else:
+                resume_pending = None
+            pending = None
             schedule = list(music_config.get("schedule", []))
             hours = float(music_config.get("change_hours", 1) or 1)
 
+        if _auto_resume_pending.get("music") is not None and not resume_ready:
+            if music_stop_event.wait(0.2): break
+            continue
+        if resume_pending:
+            ok = music_play_url(resume_pending["url"], shuffle_loop=False,
+                                resume_seconds=resume_pending.get("timestamp", 0.0))
+            console_log("INFO", f"[music] resumed after relaunch at {resume_pending.get('timestamp', 0.0)}s")
+            if ok:
+                # Keep the resumed clip owned by this loop. Without this wait,
+                # the next iteration immediately entered the schedule branch and
+                # replaced/stopped the resumed VLC player.
+                waited = 0
+                wait_seconds = max(30, hours * 3600)
+                while waited < wait_seconds and not music_stop_event.is_set() and not bot_stop_event.is_set():
+                    if music_track_naturally_ended.is_set():
+                        music_track_naturally_ended.clear()
+                        break
+                    if music_stop_event.wait(2): break
+                    waited += 2
+            continue
+
+        with music_lock:
+            pending = music_song_requests.pop(0) if music_song_requests else None
         if pending:
             music_play_url(pending["url"], shuffle_loop=pending["is_playlist"], resume_seconds=pending.get("resume_seconds", 0.0))
             kind = "playlist" if pending["is_playlist"] else "track"
@@ -6918,10 +7064,14 @@ def music_player_loop():
 
 def start_music_player():
     global music_thread
+    # Do not clear the stop event while an older loop is still unwinding.
+    # Clearing it early creates two active schedule loops after relaunch.
+    if music_thread is not None and music_thread.is_alive():
+        return False
     music_stop_event.clear()
-    if music_thread is None or not music_thread.is_alive():
-        music_thread = threading.Thread(target=music_player_loop, daemon=True)
-        music_thread.start()
+    music_thread = threading.Thread(target=music_player_loop, daemon=True)
+    music_thread.start()
+    return True
 
 def stop_music_player():
     music_stop_event.set()
@@ -7223,10 +7373,39 @@ def video_player_loop():
         time.sleep(1)
     while (not bot_stop_event.is_set()) and not video_stop_event.is_set():
         with video_lock:
-            pending = video_requests.pop(0) if video_requests else None
+            resume_pending = _auto_resume_pending.get("video")
+            resume_ready = time.time() >= _auto_resume_not_before.get("video", 0.0)
+            if resume_pending and resume_ready:
+                _auto_resume_pending["video"] = None
+            else:
+                resume_pending = None
+            pending = None
             schedule = list(video_config.get("schedule", []))
             hours = float(video_config.get("change_hours", 1) or 1)
 
+        if _auto_resume_pending.get("video") is not None and not resume_ready:
+            if video_stop_event.wait(0.2): break
+            continue
+        if resume_pending:
+            ok = video_play_url(resume_pending["url"], shuffle_loop=False,
+                                resume_seconds=resume_pending.get("timestamp", 0.0))
+            console_log("INFO", f"[video] resumed after relaunch at {resume_pending.get('timestamp', 0.0)}s")
+            if ok:
+                # Keep the resumed clip owned by this loop. Without this wait,
+                # the next iteration immediately entered the schedule branch and
+                # replaced/stopped the resumed VLC player.
+                waited = 0
+                wait_seconds = max(30, hours * 3600)
+                while waited < wait_seconds and not video_stop_event.is_set() and not bot_stop_event.is_set():
+                    if video_track_naturally_ended.is_set():
+                        video_track_naturally_ended.clear()
+                        break
+                    if video_stop_event.wait(2): break
+                    waited += 2
+            continue
+
+        with video_lock:
+            pending = video_requests.pop(0) if video_requests else None
         if pending:
             video_play_url(pending["url"], shuffle_loop=pending["is_playlist"], resume_seconds=pending.get("resume_seconds", 0.0))
             kind = "playlist" if pending["is_playlist"] else "video"
@@ -7269,10 +7448,14 @@ def video_player_loop():
 
 def start_video_player():
     global video_thread
+    # Do not clear the stop event while an older loop is still unwinding.
+    # Clearing it early creates two active schedule loops after relaunch.
+    if video_thread is not None and video_thread.is_alive():
+        return False
     video_stop_event.clear()
-    if video_thread is None or not video_thread.is_alive():
-        video_thread = threading.Thread(target=video_player_loop, daemon=True)
-        video_thread.start()
+    video_thread = threading.Thread(target=video_player_loop, daemon=True)
+    video_thread.start()
+    return True
 
 def stop_video_player():
     video_stop_event.set()
@@ -16808,35 +16991,45 @@ if __name__ == '__main__':
                         print(f'[AutoStart] Flask re-start failed: Python exception: "{traceback.format_exc()}"')
 
                 # ── Reset enabled media players after relaunch ──
-                # This deliberately follows the same sequence as clicking each
-                # player toggle off and back on: stop/disable first, then start/
-                # enable again. Disabled players remain disabled.
+                # The normal player loops consume the one-shot resume requests.
+                # They wait exactly two seconds after re-enable, preventing a
+                # second VLC player from racing the schedule loop.
                 try:
+                    with _auto_resume_lock:
+                        resume_snapshot = json.loads(json.dumps(auto_resume_media))
+
                     if video_config.get("enabled", False):
                         stop_video_player()
                         print("[info] video player disabled.")
                         time.sleep(0.25)
+                        if video_thread is not None:
+                            video_thread.join(timeout=3.0)
+                        item = resume_snapshot.get("video", {})
+                        vid = item.get("video_id")
+                        if vid:
+                            _auto_resume_pending["video"] = {
+                                "url": f"https://www.youtube.com/watch?v={vid}",
+                                "timestamp": float(item.get("timestamp", 0.0) or 0.0),
+                            }
+                            _auto_resume_not_before["video"] = time.time() + 2.0
                         start_video_player()
                         print("[info] video player enabled.")
                     if music_config.get("enabled", False):
                         stop_music_player()
                         print("[info] music player disabled.")
                         time.sleep(0.25)
+                        if music_thread is not None:
+                            music_thread.join(timeout=3.0)
+                        item = resume_snapshot.get("music", {})
+                        vid = item.get("video_id")
+                        if vid:
+                            _auto_resume_pending["music"] = {
+                                "url": f"https://www.youtube.com/watch?v={vid}",
+                                "timestamp": float(item.get("timestamp", 0.0) or 0.0),
+                            }
+                            _auto_resume_not_before["music"] = time.time() + 2.0
                         start_music_player()
                         print("[info] music player enabled.")
-                    # Resume the last saved !vr/!sr YouTube clips after the player
-                    # loops are alive. Each loop will continue its normal lifecycle.
-                    time.sleep(1.0)
-                    with _auto_resume_lock:
-                        resume_snapshot = json.loads(json.dumps(auto_resume_media))
-                    if video_config.get("enabled", False) and resume_snapshot["video"].get("video_id"):
-                        vid = resume_snapshot["video"]["video_id"]
-                        video_play_url(f"https://www.youtube.com/watch?v={vid}", resume_seconds=resume_snapshot["video"].get("timestamp", 0.0))
-                        print(f"[AutoStart] Resuming video {vid} at {resume_snapshot['video'].get('timestamp', 0.0)}s")
-                    if music_config.get("enabled", False) and resume_snapshot["music"].get("video_id"):
-                        vid = resume_snapshot["music"]["video_id"]
-                        music_play_url(f"https://www.youtube.com/watch?v={vid}", resume_seconds=resume_snapshot["music"].get("timestamp", 0.0))
-                        print(f"[AutoStart] Resuming song {vid} at {resume_snapshot['music'].get('timestamp', 0.0)}s")
                 except Exception:
                     print(f'[AutoStart] Media player relaunch reset failed: Python exception: "{traceback.format_exc()}"')
 
