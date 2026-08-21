@@ -890,11 +890,11 @@ class FeatureTab(QtWidgets.QWidget):
             form = QtWidgets.QFormLayout()
             self.font_size = QtWidgets.QSpinBox()
             self.font_size.setRange(8, 24)
-            self.font_size.setValue(int(getattr(bot.UltraBotGUI, "_FONT_SIZE", 10)))
+            self.font_size.setValue(int(getattr(bot, "_FONT_SIZE", 10)))
             form.addRow("Font size", self.font_size)
             self.colors = {}
             for key in ("BG", "BG2", "BG3", "ACCENT", "ACCENT2", "TEXT", "TEXTDIM", "CONSOLE", "BORDER"):
-                edit = QtWidgets.QLineEdit(str(getattr(bot.UltraBotGUI, key, "")))
+                edit = QtWidgets.QLineEdit(str(getattr(bot, key, "")))
                 self.colors[key] = edit
                 form.addRow(key, edit)
             self.layout.addLayout(form)
@@ -903,32 +903,79 @@ class FeatureTab(QtWidgets.QWidget):
             save.clicked.connect(self.save_appearance)
             self.layout.addWidget(save, alignment=Qt.AlignmentFlag.AlignLeft)
         elif self.name == "OS Voting":
-            self.enabled = CheckBox("Enable OS voting")
-            self.enabled.setChecked(bool(getattr(bot, "OS_VOTING_ENABLED", False)))
-            self.layout.addWidget(self.enabled)
-            form = QtWidgets.QFormLayout()
-            self.required = QtWidgets.QSpinBox()
-            self.required.setRange(1, 99)
-            self.required.setValue(int(getattr(bot, "OS_VOTE_REQUIRED", 3)))
-            form.addRow("Votes required", self.required)
-            self.layout.addLayout(form)
+            self.os_enabled = CheckBox("Enable OS voting")
+            self.os_enabled.setChecked(bool(bot.OS_VOTING_ENABLED))
+            self.layout.addWidget(self.os_enabled)
+            settings_row = QtWidgets.QFormLayout()
+            self.os_vote_required = QtWidgets.QSpinBox()
+            self.os_vote_required.setRange(1, 99)
+            self.os_vote_required.setValue(int(bot.OS_VOTE_REQUIRED))
+            settings_row.addRow("Votes required", self.os_vote_required)
+            self.os_vote_timeout = QtWidgets.QSpinBox()
+            self.os_vote_timeout.setRange(10, 600)
+            self.os_vote_timeout.setValue(int(getattr(bot, "OS_VOTE_TIMEOUT", 120)))
+            settings_row.addRow("Vote timeout (sec)", self.os_vote_timeout)
+            self.layout.addLayout(settings_row)
+            entries_group = QtWidgets.QGroupBox("OS Entries (Name + Trigger + VM Path + Backend)")
+            entries_lay = QtWidgets.QVBoxLayout(entries_group)
+            self.os_rows_host = QtWidgets.QWidget()
+            self.os_rows_form = QtWidgets.QVBoxLayout(self.os_rows_host)
+            self.os_rows_form.setSpacing(4)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(self.os_rows_host)
+            scroll.setMaximumHeight(300)
+            entries_lay.addWidget(scroll)
+            add_btn = QtWidgets.QPushButton("+ Add OS Entry")
+            add_btn.setObjectName("green")
+            add_btn.clicked.connect(lambda: self._add_os_entry_row())
+            entries_lay.addWidget(add_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+            self.layout.addWidget(entries_group, 1)
+            for entry in bot.OS_LIST:
+                self._add_os_entry_row(
+                    entry.get("name", ""), entry.get("trigger", ""),
+                    entry.get("vm", ""), entry.get("backend", "vmware"))
+            if not bot.OS_LIST:
+                for _ in range(3):
+                    self._add_os_entry_row()
             save = QtWidgets.QPushButton("Save OS Voting")
             save.setObjectName("green")
             save.clicked.connect(self.save_os_voting)
             self.layout.addWidget(save, alignment=Qt.AlignmentFlag.AlignLeft)
-            self.layout.addWidget(QtWidgets.QLabel("Detailed OS rows can be added from the original configuration file or the Tk interface."))
         elif self.name == "User Management":
-            self.whitelist = QtWidgets.QLineEdit(", ".join(sorted(getattr(bot, "whitelist_users", set()))))
-            self.whitelist.setPlaceholderText("Comma-separated allowed usernames")
-            self.layout.addWidget(QtWidgets.QLabel("Whitelist users"))
-            self.layout.addWidget(self.whitelist)
+            wl_group = QtWidgets.QGroupBox("Whitelist (comma-separated -- empty = everyone)")
+            wl_lay = QtWidgets.QVBoxLayout(wl_group)
+            self.whitelist_edit = QtWidgets.QLineEdit(", ".join(sorted(bot.whitelist_users)))
+            self.whitelist_edit.setPlaceholderText("username1, username2, ...")
+            wl_lay.addWidget(self.whitelist_edit)
+            self.layout.addWidget(wl_group)
+            vip_group = QtWidgets.QGroupBox("VIP Users (username + votes needed)")
+            vip_lay = QtWidgets.QVBoxLayout(vip_group)
+            self.vip_rows_host = QtWidgets.QWidget()
+            self.vip_rows_form = QtWidgets.QVBoxLayout(self.vip_rows_host)
+            self.vip_rows_form.setSpacing(4)
+            vip_scroll = QtWidgets.QScrollArea()
+            vip_scroll.setWidgetResizable(True)
+            vip_scroll.setWidget(self.vip_rows_host)
+            vip_scroll.setMaximumHeight(250)
+            vip_lay.addWidget(vip_scroll)
+            add_vip = QtWidgets.QPushButton("+ Add VIP User")
+            add_vip.setObjectName("green")
+            add_vip.clicked.connect(lambda: self._add_vip_row())
+            vip_lay.addWidget(add_vip, alignment=Qt.AlignmentFlag.AlignLeft)
+            self.layout.addWidget(vip_group, 1)
+            for username, info in bot.vip_users.items():
+                votes = info.get("votes_needed", 1) if isinstance(info, dict) else 1
+                self._add_vip_row(username, votes)
+            if not bot.vip_users:
+                self._add_vip_row()
             save = QtWidgets.QPushButton("Save User Management")
             save.setObjectName("green")
             save.clicked.connect(self.save_users)
             self.layout.addWidget(save, alignment=Qt.AlignmentFlag.AlignLeft)
         elif self.name == "Command Builder":
             self.command_list = QtWidgets.QListWidget()
-            self.command_list.addItems(sorted(getattr(bot, "custom_commands", {}).keys()))
+            self.command_list.addItems(sorted(bot.custom_commands.keys()))
             self.layout.addWidget(self.command_list, 1)
             row = QtWidgets.QHBoxLayout()
             self.command_name = QtWidgets.QLineEdit()
@@ -947,6 +994,63 @@ class FeatureTab(QtWidgets.QWidget):
             label.setObjectName("dim")
             self.layout.addWidget(label)
 
+    def _add_os_entry_row(self, name="", trigger="", vm="", backend="vmware"):
+        row = QtWidgets.QWidget()
+        row_lay = QtWidgets.QHBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(6)
+        name_edit = QtWidgets.QLineEdit(name)
+        name_edit.setPlaceholderText("Display name")
+        name_edit.setMaximumWidth(140)
+        trig_edit = QtWidgets.QLineEdit(trigger)
+        trig_edit.setPlaceholderText("Chat trigger")
+        trig_edit.setMaximumWidth(120)
+        vm_edit = QtWidgets.QLineEdit(vm)
+        vm_edit.setPlaceholderText("VM path (.vmx)")
+        backend_combo = QtWidgets.QComboBox()
+        backend_combo.addItems(["vmware", "vbox"])
+        backend_combo.setCurrentText(backend)
+        backend_combo.setMaximumWidth(80)
+        remove = QtWidgets.QPushButton("X")
+        remove.setObjectName("red")
+        remove.setFixedSize(28, 28)
+        row_lay.addWidget(name_edit, 2)
+        row_lay.addWidget(trig_edit, 2)
+        row_lay.addWidget(vm_edit, 5)
+        row_lay.addWidget(backend_combo, 1)
+        row_lay.addWidget(remove)
+        self.os_rows_form.addWidget(row)
+        entry = (row, name_edit, trig_edit, vm_edit, backend_combo)
+        remove.clicked.connect(lambda: self._remove_os_entry_row(entry))
+
+    def _remove_os_entry_row(self, entry):
+        entry[0].deleteLater()
+
+    def _add_vip_row(self, username="", votes_needed=1):
+        row = QtWidgets.QWidget()
+        row_lay = QtWidgets.QHBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(6)
+        user_edit = QtWidgets.QLineEdit(username)
+        user_edit.setPlaceholderText("Username")
+        user_edit.setMaximumWidth(200)
+        votes_spin = QtWidgets.QSpinBox()
+        votes_spin.setRange(1, 99)
+        votes_spin.setValue(votes_needed)
+        votes_spin.setMaximumWidth(80)
+        remove = QtWidgets.QPushButton("X")
+        remove.setObjectName("red")
+        remove.setFixedSize(28, 28)
+        row_lay.addWidget(user_edit, 3)
+        row_lay.addWidget(QtWidgets.QLabel("votes needed"))
+        row_lay.addWidget(votes_spin, 1)
+        row_lay.addWidget(remove)
+        self.vip_rows_form.addWidget(row)
+        entry = (row, user_edit, votes_spin)
+        remove.clicked.connect(lambda: self._remove_vip_row(entry))
+
+    def _remove_vip_row(self, entry):
+        entry[0].deleteLater()
     def refresh_stats(self):
         stats = getattr(bot, "_stats", {})
         self.stats.setText("\n".join(f"{key.replace('_', ' ').title()}: {value}" for key, value in stats.items()))
@@ -963,19 +1067,55 @@ class FeatureTab(QtWidgets.QWidget):
     def save_appearance(self):
         colors = {key: edit.text().strip() for key, edit in self.colors.items()}
         for key, value in colors.items():
-            setattr(bot.UltraBotGUI, key, value)
-        bot.UltraBotGUI._FONT_SIZE = self.font_size.value()
+            setattr(bot, key, value)
+        bot._FONT_SIZE = self.font_size.value()
         bot.save_appearance_config(colors, self.font_size.value())
         self._feedback("Appearance saved")
 
     def save_os_voting(self):
-        bot.OS_VOTING_ENABLED = self.enabled.isChecked()
-        bot.OS_VOTE_REQUIRED = self.required.value()
+        new_list = []
+        for child in self.os_rows_host.findChildren(QtWidgets.QWidget):
+            edits = child.findChildren(QtWidgets.QLineEdit)
+            combos = child.findChildren(QtWidgets.QComboBox)
+            if len(edits) >= 3 and combos:
+                name = edits[0].text().strip()
+                trigger = edits[1].text().strip().lower().lstrip("!")
+                vm = edits[2].text().strip()
+                backend = combos[0].currentText().strip()
+                if name or trigger or vm:
+                    new_list.append({"name": name, "trigger": trigger, "vm": vm, "backend": backend})
+        enabled = self.os_enabled.isChecked()
+        if enabled:
+            valid = [e for e in new_list if e["name"] and e["trigger"] and e["vm"]]
+            if len(valid) < 2:
+                QtWidgets.QMessageBox.warning(self, "OS Voting",
+                    "OS Voting needs at least 2 fully filled rows (Name + Trigger + VM) to be enabled.")
+                return
+        bot.OS_VOTING_ENABLED = enabled
+        bot.OS_LIST = new_list
+        try:
+            bot.OS_VOTE_REQUIRED = self.os_vote_required.value()
+            bot.OS_VOTE_TIMEOUT = self.os_vote_timeout.value()
+        except Exception:
+            pass
         bot.save_os_voting_config()
-        self._feedback("OS voting settings saved")
+        self._feedback("OS voting saved")
 
     def save_users(self):
-        bot.whitelist_users = {item.strip().lower().lstrip("@") for item in self.whitelist.text().split(",") if item.strip()}
+        bot.whitelist_users = {
+            item.strip().lower().lstrip("@")
+            for item in self.whitelist_edit.text().split(",") if item.strip()
+        }
+        vip = {}
+        for child in self.vip_rows_host.findChildren(QtWidgets.QWidget):
+            edits = child.findChildren(QtWidgets.QLineEdit)
+            spins = child.findChildren(QtWidgets.QSpinBox)
+            if edits and spins:
+                uname = edits[0].text().strip().lower().lstrip("@")
+                votes = spins[0].value()
+                if uname:
+                    vip[uname] = {"votes_needed": votes}
+        bot.vip_users = vip
         bot.save_user_mgmt()
         self._feedback("User management saved")
 
@@ -1172,6 +1312,22 @@ class VideoPanelWindow(QtWidgets.QWidget):
         super().closeEvent(event)
 
 
+class _StackedTabCompat:
+    """Legacy QTabWidget-like facade for the sidebar-backed page stack."""
+    def __init__(self, stack):
+        self._stack = stack
+
+    def addTab(self, widget, label):
+        # Labels are represented by the sidebar; retain the page insertion API.
+        return self._stack.addWidget(widget)
+
+    def count(self):
+        return self._stack.count()
+
+    def widget(self, index):
+        return self._stack.widget(index)
+
+
 class UltraBotGUIQt(QtWidgets.QMainWindow):
     # Same palette as the original app, applied through a proper Qt stylesheet
     # instead of hundreds of individual widget color= kwargs.
@@ -1190,6 +1346,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         self.setStyleSheet(_build_theme_stylesheet(self._current_theme))
         t = THEMES.get(self._current_theme, THEMES["Dark (Default)"])
         self.BG, self.BG2, self.BG3 = t["BG"], t["BG2"], t["BG3"]
+        self.BG4 = t.get("INPUT_BORDER", t["BG3"])
         self.ACCENT, self.ACCENT2 = t["ACCENT"], t["ACCENT2"]
         self.GREEN, self.RED, self.YELLOW = t["GREEN"], t["RED"], t["YELLOW"]
         self.TEXT, self.TEXTDIM = t["TEXT"], t["TEXTDIM"]
@@ -1223,6 +1380,8 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
 
         bot._gui_app = self
         bot._gui_root = self
+
+        self._restore_saved_state()
 
     # ============================= Tk-shaped API =============================
     def after(self, ms, func, *args, **kwargs):
@@ -1269,6 +1428,35 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
                     func()
                 except Exception:
                     pass
+
+    def _restore_saved_state(self):
+        """Restore saved backend, VM path, and OS voting state from disk,
+        mirroring what the Tkinter GUI does on startup."""
+        try:
+            (saved_backend, saved_vm, saved_watchdog, saved_test_mode,
+             saved_osv_vm, saved_osv_backend,
+             _, _, _, _) = bot.load_autostart_everything_config()
+        except Exception:
+            return
+        if saved_backend in ("vmware", "vbox"):
+            bot.current_vm_backend = saved_backend
+            if hasattr(self, "backend_vmware_radio"):
+                if saved_backend == "vmware":
+                    self.backend_vmware_radio.setChecked(True)
+                else:
+                    self.backend_vbox_radio.setChecked(True)
+                self._on_vm_backend_changed()
+            if saved_vm:
+                bot.VMX_PATH = saved_vm
+                bot.current_os_vm = saved_vm
+                idx = self.vm_combo.findText(saved_vm)
+                if idx >= 0:
+                    self.vm_combo.setCurrentIndex(idx)
+        if getattr(bot, "OS_VOTING_ENABLED", False) and saved_osv_vm:
+            valid_vms = [e.get("vm", "") for e in bot.OS_LIST if e.get("vm")]
+            if saved_osv_vm in valid_vms:
+                bot.current_os_vm = saved_osv_vm
+                bot.VMX_PATH = saved_osv_vm
 
     def _bind_reused_backend_methods(self):
         """Reuse these three methods from the original Tkinter GUI class verbatim --
@@ -1342,27 +1530,85 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(Qt.Orientation.Horizontal)
         outer.addWidget(splitter, 1)
 
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setUsesScrollButtons(True)
-        self.tabs.tabBar().setExpanding(False)
-        splitter.addWidget(self.tabs)
+        # ── Sidebar + Stacked Pages (replaces QTabWidget) ──
+        left_widget = QtWidgets.QWidget()
+        left_layout = QtWidgets.QHBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
 
-        self._build_main_tab()
+        self._sidebar = QtWidgets.QFrame()
+        self._sidebar.setFixedWidth(180)
+        self._sidebar.setStyleSheet(
+            f"QFrame {{ background: {self.BG2}; border-right: 1px solid {self.BG3}; }}")
+        sb_lay = QtWidgets.QVBoxLayout(self._sidebar)
+        sb_lay.setContentsMargins(8, 12, 8, 8)
+        sb_lay.setSpacing(2)
+
+        self._pages = QtWidgets.QStackedWidget()
+        # The original tab builders use `self.tabs`; keep a compatibility alias
+        # while the new shell uses a stacked page navigator.
+        self.tabs = _StackedTabCompat(self._pages)
+        self._sidebar_btns = []
+        self._sidebar_sections = []
+
+        def _add_section(label):
+            lbl = QtWidgets.QLabel(f"  {label.upper()}")
+            lbl.setStyleSheet(
+                f"color: {self.TEXTDIM}; font-size: 9px; font-weight: 700; "
+                f"letter-spacing: 1px; padding: 12px 4px 4px 4px;")
+            sb_lay.addWidget(lbl)
+            self._sidebar_sections.append(lbl)
+
+        def _add_nav(text, icon=""):
+            btn = QtWidgets.QPushButton(f" {icon}  {text}" if icon else f"  {text}")
+            btn.setStyleSheet(
+                f"QPushButton {{ text-align: left; padding: 8px 12px; border-radius: 6px; "
+                f"color: {self.TEXTDIM}; font-size: 12px; font-weight: 500; border: none; background: transparent; }} "
+                f"QPushButton:hover {{ background: rgba(255,255,255,0.05); color: {self.TEXT}; }}")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda checked=False, b=btn: self._nav_to(b))
+            sb_lay.addWidget(btn)
+            self._sidebar_btns.append(btn)
+            return btn
+
+        _add_section("General")
+        self._nav_home = _add_nav("Home", "\u25C9")
+        _add_section("Control")
+        self._nav_vm = _add_nav("VM Control", "\u2699")
+        self._nav_realpc = _add_nav("Real PC", "\u2318")
+        self._nav_media = _add_nav("Media", "\u266B")
+        _add_section("Bot")
+        self._nav_sched = _add_nav("Scheduler", "\u23F0")
+        self._nav_perms = _add_nav("Permissions", "\u2611")
+        _add_section("System")
+        self._nav_settings = _add_nav("Settings", "\u2699")
+        self._nav_config = _add_nav("Config", "\u270E")
+        sb_lay.addStretch(1)
+
+        left_layout.addWidget(self._sidebar)
+        left_layout.addWidget(self._pages, 1)
+        splitter.addWidget(left_widget)
+
+        # Build all pages
+        self._build_home_page()
         self._build_vm_tab()
-        self._build_music_tab()
-        self._build_video_tab()
-        self._build_permissions_tab()
-        self._build_scheduler_tab()
-        self._build_settings_tab()
+        self._build_realpc_page()
+        self._build_media_page()
+        self._build_scheduler_page()
+        self._build_permissions_page()
+        self._build_settings_page()
+        self._build_config_editor_tab()
         for name in PLACEHOLDER_TABS:
             self._build_backend_tab(name)
 
-        # Live Chat is a persistent side panel, not a tab -- you shouldn't have to
-        # leave whatever you're doing to see what's happening in chat.
+        # Live Chat is a persistent side panel
         splitter.addWidget(self._build_chat_panel())
         splitter.setSizes([1000, 420])
 
-        # Status bar: bot running/stopped indicator, always visible.
+        # Activate Home
+        self._nav_home.click()
+
+        # Status bar
         sb = QtWidgets.QStatusBar()
         self.setStatusBar(sb)
         self._status_dot = QtWidgets.QLabel("⬤  Stopped")
@@ -1374,6 +1620,24 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
 
         if self._auto_start:
             QtCore.QTimer.singleShot(600, self._auto_start_bot)
+
+        self._flask_poll_timer = QtCore.QTimer(self)
+        self._flask_poll_timer.timeout.connect(self._poll_flask_status)
+        self._flask_poll_timer.start(3000)
+        self._poll_flask_status()
+
+    def _nav_to(self, btn):
+        idx = self._sidebar_btns.index(btn)
+        self._pages.setCurrentIndex(idx)
+        for b in self._sidebar_btns:
+            b.setStyleSheet(
+                f"QPushButton {{ text-align: left; padding: 8px 12px; border-radius: 6px; "
+                f"color: {self.TEXTDIM}; font-size: 12px; font-weight: 500; border: none; background: transparent; }} "
+                f"QPushButton:hover {{ background: rgba(255,255,255,0.05); color: {self.TEXT}; }}")
+        btn.setStyleSheet(
+            f"QPushButton {{ text-align: left; padding: 8px 12px; border-radius: 6px; "
+            f"color: {self.ACCENT}; font-size: 12px; font-weight: 700; border: none; "
+            f"background: rgba(96,205,255,0.1); }}")
 
     def _wire_button_feedback(self):
         for button in self.findChildren(QtWidgets.QPushButton):
@@ -1419,67 +1683,137 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         self.setMask(QtGui.QRegion(path.toFillPolygon().toPolygon()))
         super().resizeEvent(event)
 
-    # ============================= Main tab =============================
-    def _build_main_tab(self):
-        tab = QtWidgets.QWidget()
-        self.tabs.addTab(tab, "Main")
-        layout = QtWidgets.QVBoxLayout(tab)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+    # ============================= Page-builder compatibility =============================
+    # The newest shell uses page names, while several native builders retained
+    # their older tab names.  These adapters keep startup and navigation stable.
+    def _build_realpc_page(self):
+        self._build_backend_tab("Real PC")
 
-        # Top bar: pause indicator + restart/toggle buttons
-        top = QtWidgets.QHBoxLayout()
+    def _build_media_page(self):
+        # Preserve both media control surfaces under the Media navigation entry.
+        self._build_music_tab()
+        self._build_video_tab()
+
+    def _build_scheduler_page(self):
+        self._build_scheduler_tab()
+
+    def _build_permissions_page(self):
+        self._build_permissions_tab()
+
+    def _build_settings_page(self):
+        self._build_settings_tab()
+
+    # ============================= Main tab =============================
+    def _build_home_page(self):
+        """Home dashboard — status cards + quick actions, like Home Assistant."""
+        page = QtWidgets.QWidget()
+        self._pages.addWidget(page)
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        # Title
+        title = QtWidgets.QLabel("Welcome back")
+        title.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {self.TEXT};")
+        layout.addWidget(title)
+
+        # ── Status Cards Row ──
+        cards = QtWidgets.QHBoxLayout()
+        cards.setSpacing(12)
+
+        def _status_card(label, icon_text, color):
+            card = QtWidgets.QFrame()
+            card.setStyleSheet(
+                f"QFrame {{ background: {self.BG3}; border-radius: 10px; border: 1px solid {self.BG4}; }}")
+            card.setFixedHeight(90)
+            cl = QtWidgets.QVBoxLayout(card)
+            cl.setContentsMargins(14, 12, 14, 12)
+            lbl_icon = QtWidgets.QLabel(icon_text)
+            lbl_icon.setStyleSheet(f"font-size: 20px; color: {color};")
+            cl.addWidget(lbl_icon)
+            lbl_name = QtWidgets.QLabel(label)
+            lbl_name.setStyleSheet(f"font-size: 10px; color: {self.TEXTDIM}; font-weight: 600;")
+            cl.addWidget(lbl_name)
+            lbl_val = QtWidgets.QLabel("Stopped")
+            lbl_val.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {self.TEXT};")
+            cl.addWidget(lbl_val)
+            return card, lbl_val
+
+        self._home_bot_card, self._home_bot_lbl = _status_card("Bot Status", "\u26A1", self.ACCENT)
+        self._home_vm_card, self._home_vm_lbl = _status_card("VM", "\u2630", self.GREEN)
+        self._home_flask_card, self._home_flask_lbl = _status_card("Overlay Server", "\u25CE", self.YELLOW)
+        self._home_rpc_card, self._home_rpc_lbl = _status_card("Real PC", "\u2318", self.TEXTDIM)
+        for c in (self._home_bot_card, self._home_vm_card, self._home_flask_card, self._home_rpc_card):
+            cards.addWidget(c)
+        layout.addLayout(cards)
+
+        # ── Quick Actions Row ──
+        qa = QtWidgets.QGroupBox("Quick Actions")
+        qa_lay = QtWidgets.QHBoxLayout(qa)
+        self._home_start_btn = QtWidgets.QPushButton("\u25B6  Start Bot")
+        self._home_start_btn.setObjectName("green")
+        self._home_start_btn.clicked.connect(self._start_bot)
+        self._home_stop_btn = QtWidgets.QPushButton("\u23F9  Stop Bot")
+        self._home_stop_btn.setObjectName("red")
+        self._home_stop_btn.clicked.connect(self._stop_bot)
+        self._home_restart_btn = QtWidgets.QPushButton("\u21BB  Restart Bot")
+        self._home_restart_btn.clicked.connect(self._on_restart_bot_clicked)
+        self._home_pause_btn = QtWidgets.QPushButton("\u23F8  Toggle Chat")
+        self._home_pause_btn.clicked.connect(self._toggle_pausechat)
+        self._home_tray_btn = QtWidgets.QPushButton("\u25C6  Minimize to Tray")
+        self._home_tray_btn.clicked.connect(self._minimize_to_tray)
+        for b in (self._home_start_btn, self._home_stop_btn, self._home_restart_btn,
+                  self._home_pause_btn, self._home_tray_btn):
+            qa_lay.addWidget(b)
+        qa_lay.addStretch(1)
+        layout.addWidget(qa)
+
+        # ── Admin controls referenced by command/pause handlers ──
+        admin = QtWidgets.QGroupBox("Admin Controls")
+        admin_lay = QtWidgets.QHBoxLayout(admin)
         self._pausechat_lbl = QtWidgets.QLabel("")
-        top.addWidget(self._pausechat_lbl)
-        top.addStretch(1)
-        btn_toggle_pause = QtWidgets.QPushButton("Toggle Chat Commands")
-        btn_toggle_pause.clicked.connect(self._toggle_pausechat)
-        top.addWidget(btn_toggle_pause)
-        btn_restart = QtWidgets.QPushButton("🔄 Restart Bot")
-        btn_restart.clicked.connect(self._on_restart_bot_clicked)
-        top.addWidget(btn_restart)
-        layout.addLayout(top)
+        admin_lay.addWidget(self._pausechat_lbl)
+        self.test_mode_check = CheckBox("Test mode")
+        self.test_mode_check.setChecked(bool(getattr(bot, "TEST_MODE_ENABLED", False)))
+        self.test_mode_check.toggled.connect(self._on_test_mode_toggle)
+        admin_lay.addWidget(self.test_mode_check)
+        admin_lay.addWidget(QtWidgets.QLabel("Command"))
+        self.admin_cmd_edit = QtWidgets.QLineEdit()
+        self.admin_cmd_edit.setPlaceholderText("!command [arguments]")
+        self.admin_cmd_edit.returnPressed.connect(self._send_admin_cmd)
+        admin_lay.addWidget(self.admin_cmd_edit, 1)
+        admin_send = QtWidgets.QPushButton("Send")
+        admin_send.clicked.connect(self._send_admin_cmd)
+        admin_lay.addWidget(admin_send)
+        layout.addWidget(admin)
         self._pausechat_poll()
 
-        # Config card
-        card = QtWidgets.QGroupBox("Connection")
-        form = QtWidgets.QGridLayout(card)
-        form.setColumnStretch(1, 1)
-        form.setColumnStretch(3, 1)
-
+        # ── Quick Connection Card ──
+        conn = QtWidgets.QGroupBox("Connection")
+        conn_lay = QtWidgets.QGridLayout(conn)
+        conn_lay.setColumnStretch(1, 1)
+        conn_lay.setColumnStretch(3, 1)
         try:
             sb_port0, sb_pass0, twitch0 = bot.load_streamerbot_config()
         except Exception:
             sb_port0, sb_pass0, twitch0 = "", "", ""
-
-        form.addWidget(QtWidgets.QLabel("Streamer.bot WS Port"), 0, 0)
+        conn_lay.addWidget(QtWidgets.QLabel("SB WS Port"), 0, 0)
         self.sb_port_edit = QtWidgets.QLineEdit(sb_port0)
-        form.addWidget(self.sb_port_edit, 0, 1)
-        form.addWidget(QtWidgets.QLabel("WS Password"), 0, 2)
+        conn_lay.addWidget(self.sb_port_edit, 0, 1)
+        conn_lay.addWidget(QtWidgets.QLabel("WS Password"), 0, 2)
         self.sb_pass_edit = QtWidgets.QLineEdit(sb_pass0)
         self.sb_pass_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self.sb_pass_edit.setPlaceholderText("Optional WebSocket password")
-        form.addWidget(self.sb_pass_edit, 0, 3)
-
-        form.addWidget(QtWidgets.QLabel("Twitch Channel"), 1, 0)
+        self.sb_pass_edit.setPlaceholderText("Optional")
+        conn_lay.addWidget(self.sb_pass_edit, 0, 3)
+        conn_lay.addWidget(QtWidgets.QLabel("Twitch Channel"), 1, 0)
         self.twitch_ch_edit = QtWidgets.QLineEdit(twitch0)
-        form.addWidget(self.twitch_ch_edit, 1, 1)
-        note = QtWidgets.QLabel("(via Streamer.bot — used for Twitch chat detection)")
-        note.setObjectName("dim")
-        form.addWidget(note, 1, 2, 1, 2)
-        test_sb = QtWidgets.QPushButton("Test Streamer.bot")
-        test_sb.setObjectName("accent")
-        test_sb.clicked.connect(self._test_streamerbot)
-        form.addWidget(test_sb, 0, 4, 2, 1)
-
-        # Autosave WS password / twitch channel 1s after typing stops
+        conn_lay.addWidget(self.twitch_ch_edit, 1, 1)
         self._sb_autosave_timer = QtCore.QTimer(self)
         self._sb_autosave_timer.setSingleShot(True)
         self._sb_autosave_timer.timeout.connect(self._save_sb_fields)
         self.sb_pass_edit.textChanged.connect(lambda: self._sb_autosave_timer.start(1000))
         self.twitch_ch_edit.textChanged.connect(lambda: self._sb_autosave_timer.start(1000))
-
-        form.addWidget(QtWidgets.QLabel("Backend"), 2, 0)
+        conn_lay.addWidget(QtWidgets.QLabel("Backend"), 2, 0)
         backend_row = QtWidgets.QHBoxLayout()
         self.backend_vmware_radio = QtWidgets.QRadioButton("VMware")
         self.backend_vbox_radio = QtWidgets.QRadioButton("VBox")
@@ -1487,62 +1821,48 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         backend_row.addWidget(self.backend_vmware_radio)
         backend_row.addWidget(self.backend_vbox_radio)
         backend_row.addStretch(1)
-        backend_wrap = QtWidgets.QWidget()
-        backend_wrap.setLayout(backend_row)
-        form.addWidget(backend_wrap, 2, 1)
+        bw = QtWidgets.QWidget(); bw.setLayout(backend_row)
+        conn_lay.addWidget(bw, 2, 1)
         self.backend_vmware_radio.toggled.connect(self._on_vm_backend_changed)
-
-        form.addWidget(QtWidgets.QLabel("VM"), 3, 0)
+        conn_lay.addWidget(QtWidgets.QLabel("VM"), 3, 0)
         self.vm_combo = QtWidgets.QComboBox()
-        form.addWidget(self.vm_combo, 3, 1)
-        btn_refresh_vm = QtWidgets.QPushButton("🔄 Refresh")
-        btn_refresh_vm.clicked.connect(self._refresh_vm_list)
-        form.addWidget(btn_refresh_vm, 3, 2)
-
-        self.auto_start_check = CheckBox("Auto-restart the VM if it's found powered off")
+        conn_lay.addWidget(self.vm_combo, 3, 1)
+        btn_ref = QtWidgets.QPushButton("\u21BB")
+        btn_ref.setFixedWidth(36)
+        btn_ref.clicked.connect(self._refresh_vm_list)
+        conn_lay.addWidget(btn_ref, 3, 2)
+        self.auto_start_check = CheckBox("Auto-restart VM if found powered off")
         self.auto_start_check.setChecked(bool(getattr(bot, "AUTO_START_ENABLED", False)))
-        form.addWidget(self.auto_start_check, 4, 1, 1, 2)
+        conn_lay.addWidget(self.auto_start_check, 4, 1, 1, 2)
+        layout.addWidget(conn)
 
-        layout.addWidget(card)
+        # ── Flask Overlays ──
+        flask_card = QtWidgets.QGroupBox("Overlay Server")
+        fk = QtWidgets.QHBoxLayout(flask_card)
+        fk.addWidget(QtWidgets.QLabel("Port"))
+        self.flask_port_edit = QtWidgets.QSpinBox()
+        self.flask_port_edit.setRange(5900, 5999)
+        self.flask_port_edit.setValue(int(bot.FLASK_CONFIG.get("port", 5900)))
+        self.flask_port_edit.valueChanged.connect(
+            lambda v: (bot.FLASK_CONFIG.__setitem__("port", v), bot.save_flask_config()))
+        fk.addWidget(self.flask_port_edit)
+        fs = QtWidgets.QPushButton("Start"); fs.setObjectName("green")
+        fs.clicked.connect(self._flask_start); fk.addWidget(fs)
+        fstop = QtWidgets.QPushButton("Stop"); fstop.setObjectName("red")
+        fstop.clicked.connect(self._flask_stop); fk.addWidget(fstop)
+        fo = QtWidgets.QPushButton("Open"); fo.setObjectName("accent")
+        fo.clicked.connect(self._flask_open); fk.addWidget(fo)
+        fk.addStretch(1)
+        self.flask_status_lbl = QtWidgets.QLabel(""); self.flask_status_lbl.setObjectName("dim")
+        fk.addWidget(self.flask_status_lbl)
+        layout.addWidget(flask_card)
 
-        # Start/Stop
-        btn_row = QtWidgets.QHBoxLayout()
-        self.start_btn = QtWidgets.QPushButton("▶  Start Bot")
-        self.start_btn.setObjectName("green")
-        self.start_btn.clicked.connect(self._start_bot)
-        self.stop_btn = QtWidgets.QPushButton("⏹  Stop Bot")
-        self.stop_btn.setObjectName("red")
-        self.stop_btn.clicked.connect(self._stop_bot)
-        self.tray_btn = QtWidgets.QPushButton("📌  Minimize to Tray")
-        self.tray_btn.clicked.connect(self._minimize_to_tray)
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.stop_btn)
-        btn_row.addWidget(self.tray_btn)
-        btn_row.addStretch(1)
-        layout.addLayout(btn_row)
-
-        # Test mode
-        self.test_mode_check = CheckBox(
-            "🧪  Test Mode  (control VM from console — no chat connection needed)")
-        self.test_mode_check.stateChanged.connect(self._on_test_mode_toggle)
-        layout.addWidget(self.test_mode_check)
-
-        # Admin command bar
-        admin_row = QtWidgets.QHBoxLayout()
-        admin_row.addWidget(QtWidgets.QLabel("Admin CMD:"))
-        self.admin_cmd_edit = QtWidgets.QLineEdit()
-        self.admin_cmd_edit.returnPressed.connect(self._send_admin_cmd)
-        admin_row.addWidget(self.admin_cmd_edit, 1)
-        send_btn = QtWidgets.QPushButton("Send")
-        send_btn.clicked.connect(self._send_admin_cmd)
-        admin_row.addWidget(send_btn)
-        layout.addLayout(admin_row)
-
-        # Console
+        # ── Console (compact) ──
         self._console_widget = QtWidgets.QPlainTextEdit()
         self._console_widget.setReadOnly(True)
-        self._console_widget.setStyleSheet("background:#0a0a14; font-family: Consolas, monospace;")
-        layout.addWidget(self._console_widget, 1)
+        self._console_widget.setMaximumHeight(160)
+        self._console_widget.setStyleSheet("background:#0a0a14; font-family: Consolas, monospace; font-size: 11px;")
+        layout.addWidget(self._console_widget)
         self._console = TkTextShim(self._console_widget)
 
         self._refresh_vm_list()
@@ -1552,6 +1872,34 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         bot.TWITCH_CHANNEL = self.twitch_ch_edit.text().strip()
         bot.save_streamerbot_config()
         self._set_feedback("Streamer.bot settings saved")
+
+    def _flask_start(self):
+        port = self.flask_port_edit.value()
+        ok, msg = bot.start_flask_server(port)
+        status = f"Running on :{port}" if ok else msg
+        self.flask_status_lbl.setText(status)
+        self.flask_status_lbl.setStyleSheet(f"color: {self.GREEN if ok else self.RED};")
+        self._set_feedback(f"Flask: {msg}")
+
+    def _flask_stop(self):
+        ok, msg = bot.stop_flask_server()
+        self.flask_status_lbl.setText("Stopped")
+        self.flask_status_lbl.setStyleSheet(f"color: {self.RED};")
+        self._set_feedback(f"Flask: {msg}")
+
+    def _flask_open(self):
+        port = self.flask_port_edit.value()
+        bot.open_flask_dashboard(port)
+
+    def _poll_flask_status(self):
+        running = getattr(bot, "_flask_running", False)
+        if running:
+            port = bot.FLASK_CONFIG.get("port", 5900)
+            self.flask_status_lbl.setText(f"Running on :{port}")
+            self.flask_status_lbl.setStyleSheet(f"color: {self.GREEN};")
+        else:
+            self.flask_status_lbl.setText("Stopped")
+            self.flask_status_lbl.setStyleSheet(f"color: {self.TEXTDIM};")
 
     def _test_streamerbot(self):
         port = self.sb_port_edit.text().strip()
@@ -2705,6 +3053,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         return box
 
     def _append_chat(self, user, msg, is_owner=False, is_command=False, is_banned=False, is_mod=False, platform=""):
+        """Thread-safe Live Chat renderer with platform and role markers."""
         """Thread-safe regardless of caller (some backend call sites call this
         directly from a background thread without wrapping in .after() themselves --
         this dispatches to the GUI thread internally either way)."""
@@ -2714,12 +3063,12 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             msg_html = QtGui.QTextDocumentFragment.fromPlainText(msg).toHtml()
             user_html = QtGui.QTextDocumentFragment.fromPlainText(user).toHtml()
             platform = (platform or "").lower()
-            pmark = ""
-            pcolor = self.TEXT
             if platform == "twitch":
-                pmark = '<span style="color:#9146FF; font-weight:900;">T</span> '
+                platform_mark = '<span style="color:#9146FF; font-weight:900;">T</span> '
             elif platform in ("youtube", "yt"):
-                pmark = '<span style="color:#FF0000; font-weight:900;">▶</span> '
+                platform_mark = '<span style="color:#FF0000; font-weight:900;">▶</span> '
+            else:
+                platform_mark = ''
             if is_banned:
                 name_html = f'<span style="color:{self.RED}; text-decoration: line-through;">{user}</span>'
             elif is_owner:
@@ -2731,7 +3080,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             else:
                 name_html = f'<span style="color:{self.TEXT};">{user}</span>'
             msg_color = self.ACCENT2 if is_command else self.TEXT
-            line = (f'<span style="color:{self.TEXTDIM};">[{ts}]</span> {pmark}{name_html}'
+            line = (f'<span style="color:{self.TEXTDIM};">[{ts}]</span> {platform_mark}{name_html}'
                     f'<span style="color:{self.TEXTDIM};">: </span>'
                     f'<span style="color:{msg_color};">{msg}</span>')
             self._chat_viewer.append(line)
@@ -2784,6 +3133,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         self._current_theme = name
         t = THEMES[name]
         self.BG, self.BG2, self.BG3 = t["BG"], t["BG2"], t["BG3"]
+        self.BG4 = t.get("INPUT_BORDER", t["BG3"])
         self.ACCENT, self.ACCENT2 = t["ACCENT"], t["ACCENT2"]
         self.GREEN, self.RED, self.YELLOW = t["GREEN"], t["RED"], t["YELLOW"]
         self.TEXT, self.TEXTDIM = t["TEXT"], t["TEXTDIM"]
@@ -2823,6 +3173,113 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         save_btn.clicked.connect(self._save_all_configs)
         layout.addWidget(save_btn)
         self.tabs.addTab(tab, "Settings")
+
+    def _build_config_editor_tab(self):
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        hdr = QtWidgets.QHBoxLayout()
+        lbl = QtWidgets.QLabel("Config Editor")
+        lbl.setStyleSheet("font-size:14px; font-weight:700;")
+        hdr.addWidget(lbl)
+        hdr.addStretch()
+        self._cfg_refresh_btn = QtWidgets.QPushButton("Refresh")
+        self._cfg_refresh_btn.clicked.connect(self._cfg_refresh_files)
+        hdr.addWidget(self._cfg_refresh_btn)
+        layout.addLayout(hdr)
+
+        file_row = QtWidgets.QHBoxLayout()
+        file_row.addWidget(QtWidgets.QLabel("File:"))
+        self._cfg_file_combo = QtWidgets.QComboBox()
+        self._cfg_file_combo.setMinimumWidth(300)
+        self._cfg_file_combo.currentTextChanged.connect(self._cfg_load_file)
+        file_row.addWidget(self._cfg_file_combo, 1)
+        layout.addLayout(file_row)
+
+        self._cfg_editor = QtWidgets.QPlainTextEdit()
+        self._cfg_editor.setPlaceholderText("Select a config file above to load it...")
+        font = self._cfg_editor.font()
+        font.setFamily("Cascadia Code, Consolas, monospace")
+        font.setPointSize(10)
+        self._cfg_editor.setFont(font)
+        self._cfg_editor.setTabStopDistance(
+            QtGui.QFontMetricsF(font).horizontalAdvance(' ') * 4)
+        layout.addWidget(self._cfg_editor, 1)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self._cfg_save_btn = QtWidgets.QPushButton("Save File")
+        self._cfg_save_btn.clicked.connect(self._cfg_save_file)
+        btn_row.addWidget(self._cfg_save_btn)
+        self._cfg_reload_btn = QtWidgets.QPushButton("Reload")
+        self._cfg_reload_btn.clicked.connect(lambda: self._cfg_load_file(
+            self._cfg_file_combo.currentText()))
+        btn_row.addWidget(self._cfg_reload_btn)
+        btn_row.addStretch()
+        self._cfg_status = QtWidgets.QLabel("")
+        self._cfg_status.setStyleSheet("font-size:11px;")
+        btn_row.addWidget(self._cfg_status)
+        layout.addLayout(btn_row)
+
+        self.tabs.addTab(tab, "Config")
+        self._cfg_refresh_files()
+
+    def _cfg_refresh_files(self):
+        self._cfg_file_combo.blockSignals(True)
+        self._cfg_file_combo.clear()
+        config_dir = bot._config_path("") if hasattr(bot, '_config_path') else ""
+        if config_dir and os.path.isdir(config_dir):
+            for f in sorted(os.listdir(config_dir)):
+                if f.endswith('.json'):
+                    self._cfg_file_combo.addItem(f)
+        self._cfg_file_combo.blockSignals(False)
+        if self._cfg_file_combo.count() > 0:
+            self._cfg_file_combo.setCurrentIndex(0)
+
+    def _cfg_load_file(self, name):
+        if not name:
+            return
+        config_dir = bot._config_path("") if hasattr(bot, '_config_path') else ""
+        path = os.path.join(config_dir, name) if config_dir else ""
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self._cfg_editor.setPlainText(content)
+            self._cfg_status.setText(f"Loaded: {name}")
+            self._cfg_status.setStyleSheet(f"color: {self.GREEN};")
+        except Exception as e:
+            self._cfg_editor.setPlainText("")
+            self._cfg_status.setText(f"Error: {e}")
+            self._cfg_status.setStyleSheet(f"color: {self.RED};")
+
+    def _cfg_save_file(self):
+        name = self._cfg_file_combo.currentText()
+        if not name:
+            return
+        content = self._cfg_editor.toPlainText()
+        config_dir = bot._config_path("") if hasattr(bot, '_config_path') else ""
+        path = os.path.join(config_dir, name) if config_dir else ""
+        try:
+            import json
+            json.loads(content)
+        except json.JSONDecodeError as e:
+            QtWidgets.QMessageBox.warning(self, "Invalid JSON",
+                f"JSON parse error on line {e.lineno}:\n{e.msg}")
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            self._cfg_status.setText(f"Saved: {name}")
+            self._cfg_status.setStyleSheet(f"color: {self.GREEN};")
+            self._set_feedback(f"Config saved: {name}")
+            if name == "streamerbot.json":
+                bot.load_streamerbot_config()
+            elif name == "realpc_config.json":
+                bot.load_realpc_config()
+        except Exception as e:
+            self._cfg_status.setText(f"Error: {e}")
+            self._cfg_status.setStyleSheet(f"color: {self.RED};")
 
     def _save_all_configs(self):
         saved = []
@@ -3031,17 +3488,11 @@ def main():
             w = UltraBotGUIQt(auto_start=True)
             window[0] = w
             w.show()
-            # Activate the backend's existing continuous auto-update and local
-            # file-edit hot-reload watchdogs for the PyQt frontend as well.
-            # They are started once, after the GUI exists, so update dialogs and
-            # relaunch state can use the current application context safely.
             running_names = {t.name for t in threading.enumerate()}
             if "autoupdate_watcher" not in running_names and hasattr(bot, "_autoupdate_watcher"):
-                threading.Thread(target=bot._autoupdate_watcher, daemon=True,
-                                 name="autoupdate_watcher").start()
+                threading.Thread(target=bot._autoupdate_watcher, daemon=True, name="autoupdate_watcher").start()
             if "file_edit_watchdog" not in running_names and hasattr(bot, "_file_edit_watchdog"):
-                threading.Thread(target=bot._file_edit_watchdog, daemon=True,
-                                 name="file_edit_watchdog").start()
+                threading.Thread(target=bot._file_edit_watchdog, daemon=True, name="file_edit_watchdog").start()
         except Exception as exc:
             splash.close()
             QtWidgets.QMessageBox.critical(
