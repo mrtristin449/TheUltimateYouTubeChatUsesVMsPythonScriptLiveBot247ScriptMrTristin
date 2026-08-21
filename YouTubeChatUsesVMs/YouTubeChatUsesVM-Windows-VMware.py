@@ -6,6 +6,7 @@ import threading
 import tkinter as tk
 
 # Keep the module available under the existing alias used elsewhere in this file as well.
+# test auto update brb
 _threading_module = threading
 import tkinter.font as tkfont
 import os
