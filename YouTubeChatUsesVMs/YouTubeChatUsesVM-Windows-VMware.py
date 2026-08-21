@@ -16450,10 +16450,16 @@ if __name__ == '__main__':
                         print(f"[AutoStart] Flask re-started on port {_LAUNCH_FLASK_PORT}: {msg}")
                         if ok and OBS_CONFIG.get("enabled", False):
                             time.sleep(2.0)
+                            # Reuse the existing OBS_CONFIG (host, port, password),
+                            # rather than creating a separate relaunch configuration.
+                            # Normally the connection from GUI startup is still live;
+                            # reconnect only if that existing connection is unavailable.
+                            if not _obs_connected:
+                                obs_connect()
                             if obs_refresh_browser_source("chat"):
-                                print("[AutoStart] OBS chat browser source refreshed after Flask connected.")
+                                print("[AutoStart] OBS Browser source 'chat' refreshed after Flask connected.")
                             else:
-                                print("[AutoStart] Could not refresh OBS chat browser source (OBS not connected or source missing).")
+                                print("[AutoStart] Could not refresh OBS Browser source 'chat' (OBS not connected or source missing).")
                     except Exception:
                         print(f'[AutoStart] Flask re-start failed: Python exception: "{traceback.format_exc()}"')
 
