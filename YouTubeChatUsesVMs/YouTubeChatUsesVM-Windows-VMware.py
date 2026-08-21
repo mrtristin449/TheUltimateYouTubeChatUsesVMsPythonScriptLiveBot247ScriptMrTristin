@@ -327,7 +327,7 @@ def _validate_encryption_password(vmx_path, password):
 
 PLACEHOLDER_TABS = [
     "OS Voting", "Appearance", "OBS", "Statistics", "User Management",
-    "Event Log", "Sound / TTS", "Real PC Control",
+    "Event Log", "Sound / TTS",
     "Reconnect", "Soundboard", "VNC / Web", "Fun", "MrTristinAI",
     "Command Builder", "YT Relay", "Host Switch",
 ]
@@ -1383,6 +1383,205 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
 
         self._restore_saved_state()
 
+    # ============================= Vector Icon Factory =============================
+    @staticmethod
+    def _mk_icon(name, color="#e0e0e0", size=20):
+        """Draw a simple vector icon using QPainter. Returns a QIcon."""
+        px = QtGui.QPixmap(size, size)
+        px.fill(QtCore.Qt.GlobalColor.transparent)
+        p = QtGui.QPainter(px)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        c = QtGui.QColor(color)
+        p.setPen(QtGui.QPen(c, 1.6, QtCore.Qt.PenStyle.SolidLine,
+                             QtCore.Qt.PenCapStyle.RoundCap, QtCore.Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(QtGui.QBrush(c, QtCore.Qt.BrushStyle.NoBrush))
+        s = size
+        m = s * 0.18  # margin
+        if name == "home":
+            p.drawPolygon(QtGui.QPolygonF([
+                QtCore.QPointF(s / 2, m),
+                QtCore.QPointF(s - m, s * 0.48),
+                QtCore.QPointF(s * 0.72, s * 0.48),
+                QtCore.QPointF(s * 0.72, s - m),
+                QtCore.QPointF(s * 0.28, s - m),
+                QtCore.QPointF(s * 0.28, s * 0.48),
+                QtCore.QPointF(m, s * 0.48),
+            ]))
+        elif name == "vm":
+            # monitor with stand
+            p.drawRect(int(m), int(m), int(s - 2 * m), int(s * 0.58))
+            p.drawLine(int(s / 2), int(m + s * 0.58), int(s / 2), int(s * 0.82))
+            p.drawLine(int(s * 0.3), int(s * 0.82), int(s * 0.7), int(s * 0.82))
+            # screen inner
+            inner_m = m + 3
+            p.setPen(QtGui.QPen(QtGui.QColor(c.red(), c.green(), c.blue(), 80), 1))
+            p.drawRect(int(inner_m), int(inner_m), int(s - 2 * inner_m - 2), int(s * 0.52))
+        elif name == "pc":
+            # desktop PC tower
+            p.drawRect(int(m), int(m), int(s * 0.45), int(s - 2 * m))
+            p.drawLine(int(m + s * 0.12), int(s * 0.35), int(m + s * 0.33), int(s * 0.35))
+            p.drawEllipse(int(m + s * 0.18), int(s * 0.52), int(s * 0.09), int(s * 0.09))
+            # monitor
+            mon_x = int(m + s * 0.55)
+            p.setPen(QtGui.QPen(c, 1.6))
+            p.drawRect(mon_x, int(m), int(s * 0.42), int(s * 0.58))
+            p.drawLine(int(mon_x + s * 0.21), int(m + s * 0.58), int(mon_x + s * 0.21), int(s * 0.82))
+            p.drawLine(int(mon_x + s * 0.08), int(s * 0.82), int(mon_x + s * 0.34), int(s * 0.82))
+        elif name == "music":
+            # eighth note
+            p.setBrush(QtGui.QBrush(c))
+            p.drawEllipse(int(s * 0.55), int(m), int(s * 0.32), int(s * 0.28))
+            p.setPen(QtGui.QPen(c, 2))
+            p.drawLine(int(s * 0.78), int(m + s * 0.14), int(s * 0.78), int(s * 0.82))
+            p.drawLine(int(s * 0.78), int(s * 0.82), int(s * 0.55), int(s * 0.68))
+        elif name == "video":
+            # play triangle in rectangle
+            p.drawRect(int(m), int(m + s * 0.1), int(s - 2 * m), int(s - 2 * m - s * 0.1))
+            p.setBrush(QtGui.QBrush(c))
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.drawPolygon(QtGui.QPolygonF([
+                QtCore.QPointF(s * 0.35, s * 0.3),
+                QtCore.QPointF(s * 0.35, s * 0.75),
+                QtCore.QPointF(s * 0.72, s * 0.525),
+            ]))
+        elif name == "clock":
+            p.drawEllipse(int(m), int(m), int(s - 2 * m), int(s - 2 * m))
+            cx, cy = s / 2, s / 2
+            p.drawLine(int(cx), int(cy), int(cx), int(m + s * 0.12))
+            p.drawLine(int(cx), int(cy), int(cx + s * 0.22), int(cy))
+        elif name == "shield":
+            p.drawPolygon(QtGui.QPolygonF([
+                QtCore.QPointF(s / 2, m),
+                QtCore.QPointF(s - m, m + s * 0.2),
+                QtCore.QPointF(s - m, s * 0.55),
+                QtCore.QPointF(s / 2, s - m),
+                QtCore.QPointF(m, s * 0.55),
+                QtCore.QPointF(m, m + s * 0.2),
+            ]))
+            # checkmark inside
+            p.setPen(QtGui.QPen(c, 2.2))
+            p.drawLine(int(s * 0.32), int(s * 0.52), int(s * 0.46), int(s * 0.67))
+            p.drawLine(int(s * 0.46), int(s * 0.67), int(s * 0.72), int(s * 0.36))
+        elif name == "gear":
+            # simplified gear - circle with notches
+            p.drawEllipse(int(m + s * 0.1), int(m + s * 0.1), int(s * 0.6), int(s * 0.6))
+            p.drawEllipse(int(m + s * 0.25), int(m + s * 0.25), int(s * 0.3), int(s * 0.3))
+            # 8 notch lines
+            import math
+            for angle_deg in range(0, 360, 45):
+                rad = math.radians(angle_deg)
+                x1 = s / 2 + (s * 0.3) * math.cos(rad)
+                y1 = s / 2 + (s * 0.3) * math.sin(rad)
+                x2 = s / 2 + (s * 0.45) * math.cos(rad)
+                y2 = s / 2 + (s * 0.45) * math.sin(rad)
+                p.drawLine(int(x1), int(y1), int(x2), int(y2))
+        elif name == "document":
+            # page with lines
+            p.drawRect(int(m + s * 0.08), int(m), int(s * 0.68), int(s - 2 * m))
+            p.setPen(QtGui.QPen(QtGui.QColor(c.red(), c.green(), c.blue(), 120), 1))
+            for i in range(3):
+                y = int(m + s * 0.22 + i * s * 0.18)
+                p.drawLine(int(m + s * 0.2), y, int(m + s * 0.62), y)
+        elif name == "server":
+            # stacked rectangles (server rack)
+            for i in range(3):
+                y = int(m + i * s * 0.27)
+                h = int(s * 0.2)
+                p.drawRect(int(m), y, int(s - 2 * m), h)
+                p.drawEllipse(int(m + s * 0.05), int(y + h * 0.3), int(s * 0.08), int(s * 0.08))
+                p.drawLine(int(m + s * 0.25), int(y + h * 0.5), int(m + s * 0.55), int(y + h * 0.5))
+        elif name == "refresh":
+            # circular arrow
+            p.drawEllipse(int(m + s * 0.08), int(m + s * 0.08), int(s * 0.7), int(s * 0.7))
+            p.setBrush(QtGui.QBrush(c))
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.drawPolygon(QtGui.QPolygonF([
+                QtCore.QPointF(s * 0.75, s * 0.18),
+                QtCore.QPointF(s * 0.88, s * 0.35),
+                QtCore.QPointF(s * 0.62, s * 0.35),
+            ]))
+        elif name == "log":
+            # terminal/console
+            p.drawRect(int(m), int(m), int(s - 2 * m), int(s - 2 * m))
+            p.setPen(QtGui.QPen(c, 1.8))
+            p.drawLine(int(m + s * 0.15), int(s * 0.38), int(m + s * 0.06), int(s * 0.5))
+            p.drawLine(int(m + s * 0.06), int(s * 0.5), int(m + s * 0.15), int(s * 0.62))
+            p.drawLine(int(m + s * 0.22), int(s * 0.62), int(m + s * 0.42), int(s * 0.62))
+        elif name == "speaker":
+            # speaker cone
+            p.drawPolygon(QtGui.QPolygonF([
+                QtCore.QPointF(m + s * 0.1, s * 0.35),
+                QtCore.QPointF(m + s * 0.3, m + s * 0.2),
+                QtCore.QPointF(m + s * 0.3, s - m - s * 0.2),
+                QtCore.QPointF(m + s * 0.1, s * 0.65),
+            ]))
+            # sound waves
+            p.setPen(QtGui.QPen(c, 1.4))
+            p.drawArc(int(m + s * 0.38), int(m + s * 0.2), int(s * 0.35), int(s * 0.6),
+                      -45 * 16, 90 * 16)
+            p.drawArc(int(m + s * 0.48), int(m + s * 0.1), int(s * 0.45), int(s * 0.8),
+                      -45 * 16, 90 * 16)
+        elif name == "robot":
+            # head outline
+            p.drawRect(int(m + s * 0.15), int(m + s * 0.15), int(s * 0.7), int(s * 0.55))
+            # eyes
+            p.setBrush(QtGui.QBrush(c))
+            p.drawEllipse(int(m + s * 0.25), int(s * 0.35), int(s * 0.12), int(s * 0.12))
+            p.drawEllipse(int(m + s * 0.55), int(s * 0.35), int(s * 0.12), int(s * 0.12))
+            # antenna
+            p.setPen(QtGui.QPen(c, 1.6))
+            p.drawLine(int(s / 2), int(m + s * 0.15), int(s / 2), int(m))
+            p.setBrush(QtGui.QBrush(c))
+            p.drawEllipse(int(s / 2 - 2), int(m - 2), 4, 4)
+            # mouth
+            p.setPen(QtGui.QPen(c, 1.2))
+            p.drawLine(int(m + s * 0.3), int(s * 0.58), int(m + s * 0.62), int(s * 0.58))
+        elif name == "tray":
+            # pushpin
+            p.drawEllipse(int(m + s * 0.15), int(m), int(s * 0.3), int(s * 0.3))
+            p.setPen(QtGui.QPen(c, 2))
+            p.drawLine(int(m + s * 0.3), int(m + s * 0.3), int(m + s * 0.3), int(s - m))
+            p.drawLine(int(m + s * 0.15), int(s - m - s * 0.1), int(m + s * 0.45), int(s - m - s * 0.1))
+        elif name == "fun":
+            # star / sparkle
+            import math
+            pts = []
+            for i in range(10):
+                angle = math.radians(i * 36 - 90)
+                r = s * 0.42 if i % 2 == 0 else s * 0.2
+                pts.append(QtCore.QPointF(s / 2 + r * math.cos(angle), s / 2 + r * math.sin(angle)))
+            p.setBrush(QtGui.QBrush(c))
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.drawPolygon(QtGui.QPolygonF(pts))
+        elif name == "host":
+            # globe / network
+            p.drawEllipse(int(m), int(m + s * 0.1), int(s - 2 * m), int(s - 2 * m - s * 0.1))
+            p.setPen(QtGui.QPen(QtGui.QColor(c.red(), c.green(), c.blue(), 100), 1))
+            p.drawEllipse(int(m + s * 0.15), int(m + s * 0.1), int(s * 0.5), int(s - 2 * m - s * 0.1))
+            p.drawLine(int(m), int(s / 2), int(s - m), int(s / 2))
+        elif name == "wrench":
+            # wrench tool
+            p.setPen(QtGui.QPen(c, 2.2))
+            p.drawLine(int(m + s * 0.7), int(m + s * 0.7), int(m + s * 0.25), int(m + s * 0.25))
+            p.drawEllipse(int(m + s * 0.05), int(m + s * 0.05), int(s * 0.35), int(s * 0.35))
+            p.setBrush(QtGui.QBrush(c))
+            p.drawEllipse(int(m + s * 0.15), int(m + s * 0.15), int(s * 0.15), int(s * 0.15))
+        elif name == "vnc":
+            # monitor with wifi signal
+            p.drawRect(int(m), int(m), int(s - 2 * m), int(s * 0.6))
+            p.drawLine(int(s / 2), int(s * 0.6), int(s / 2), int(s * 0.75))
+            p.drawLine(int(s * 0.3), int(s * 0.75), int(s * 0.7), int(s * 0.75))
+            # signal arcs
+            p.setPen(QtGui.QPen(c, 1.2))
+            p.drawArc(int(s * 0.25), int(s * 0.05), int(s * 0.5), int(s * 0.5), -30 * 16, 60 * 16)
+        else:
+            # generic dot
+            p.setBrush(QtGui.QBrush(c))
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.drawEllipse(int(m + s * 0.3), int(m + s * 0.3), int(s * 0.4), int(s * 0.4))
+        p.end()
+        return QtGui.QIcon(px)
+
     # ============================= Tk-shaped API =============================
     def after(self, ms, func, *args, **kwargs):
         return self._after_shim.after(ms, func, *args, **kwargs)
@@ -1559,8 +1758,10 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             sb_lay.addWidget(lbl)
             self._sidebar_sections.append(lbl)
 
-        def _add_nav(text, icon=""):
-            btn = QtWidgets.QPushButton(f" {icon}  {text}" if icon else f"  {text}")
+        def _add_nav(text, icon_name=None):
+            btn = QtWidgets.QPushButton(f"  {text}")
+            if icon_name:
+                btn.setIcon(self._mk_icon(icon_name, self.TEXTDIM, 18))
             btn.setStyleSheet(
                 f"QPushButton {{ text-align: left; padding: 8px 12px; border-radius: 6px; "
                 f"color: {self.TEXTDIM}; font-size: 12px; font-weight: 500; border: none; background: transparent; }} "
@@ -1572,17 +1773,33 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             return btn
 
         _add_section("General")
-        self._nav_home = _add_nav("Home", "\u25C9")
+        self._nav_home = _add_nav("Home", "home")
         _add_section("Control")
-        self._nav_vm = _add_nav("VM Control", "\u2699")
-        self._nav_realpc = _add_nav("Real PC", "\u2318")
-        self._nav_media = _add_nav("Media", "\u266B")
+        self._nav_vm = _add_nav("VM Control", "vm")
+        self._nav_realpc = _add_nav("Real PC", "pc")
+        self._nav_music = _add_nav("Music", "music")
+        self._nav_video = _add_nav("Video", "video")
         _add_section("Bot")
-        self._nav_sched = _add_nav("Scheduler", "\u23F0")
-        self._nav_perms = _add_nav("Permissions", "\u2611")
+        self._nav_sched = _add_nav("Scheduler", "clock")
+        self._nav_perms = _add_nav("Permissions", "shield")
         _add_section("System")
-        self._nav_settings = _add_nav("Settings", "\u2699")
-        self._nav_config = _add_nav("Config", "\u270E")
+        self._nav_settings = _add_nav("Settings", "gear")
+        self._nav_config = _add_nav("Config", "document")
+        _add_section("Advanced")
+        self._backend_nav_btns = {}
+        _backend_icon_map = {
+            "OS Voting": "shield", "Appearance": "gear", "OBS": "vm",
+            "Statistics": "document", "User Management": "pc",
+            "Event Log": "log", "Sound / TTS": "speaker",
+            "Real PC Control": "pc", "Reconnect": "refresh",
+            "Soundboard": "speaker", "VNC / Web": "vnc",
+            "Fun": "fun", "MrTristinAI": "robot",
+            "Command Builder": "wrench", "YT Relay": "refresh",
+            "Host Switch": "host",
+        }
+        for name in PLACEHOLDER_TABS:
+            nav = _add_nav(name, _backend_icon_map.get(name, "document"))
+            self._backend_nav_btns[name] = nav
         sb_lay.addStretch(1)
 
         left_layout.addWidget(self._sidebar)
@@ -1598,6 +1815,9 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         self._build_permissions_page()
         self._build_settings_page()
         self._build_config_editor_tab()
+        # Placeholder pages are appended after the core pages; navigation uses
+        # this saved base index for the advanced sidebar entries.
+        self._backend_tab_start_index = self._pages.count()
         for name in PLACEHOLDER_TABS:
             self._build_backend_tab(name)
 
@@ -1611,7 +1831,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         # Status bar
         sb = QtWidgets.QStatusBar()
         self.setStatusBar(sb)
-        self._status_dot = QtWidgets.QLabel("⬤  Stopped")
+        self._status_dot = QtWidgets.QLabel("Stopped")
         self._status_dot.setStyleSheet(f"color: {self.RED}; font-weight: 700; padding: 2px 8px;")
         sb.addPermanentWidget(self._status_dot)
         self._feedback_label = QtWidgets.QLabel("Ready")
@@ -1628,6 +1848,10 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
 
     def _nav_to(self, btn):
         idx = self._sidebar_btns.index(btn)
+        for name, nav_btn in self._backend_nav_btns.items():
+            if btn is nav_btn:
+                idx = self._backend_tab_start_index + PLACEHOLDER_TABS.index(name)
+                break
         self._pages.setCurrentIndex(idx)
         for b in self._sidebar_btns:
             b.setStyleSheet(
@@ -1684,13 +1908,93 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         super().resizeEvent(event)
 
     # ============================= Page-builder compatibility =============================
-    # The newest shell uses page names, while several native builders retained
-    # their older tab names.  These adapters keep startup and navigation stable.
     def _build_realpc_page(self):
-        self._build_backend_tab("Real PC")
+        page = QtWidgets.QWidget()
+        self._pages.addWidget(page)
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+
+        title = QtWidgets.QLabel("Real PC Control")
+        title.setObjectName("h1")
+        layout.addWidget(title)
+        sub = QtWidgets.QLabel("Run commands directly on your real machine (not the VM).")
+        sub.setObjectName("dim")
+        sub.setWordWrap(True)
+        layout.addWidget(sub)
+
+        cfg = getattr(bot, "REALPC_CONFIG", {})
+
+        enabled_row = QtWidgets.QHBoxLayout()
+        self.rpc_enabled_check = CheckBox("Enable Real PC Control from chat")
+        self.rpc_enabled_check.setChecked(bool(cfg.get("enabled", False)))
+        self.rpc_enabled_check.stateChanged.connect(self._rpc_toggle_enabled)
+        enabled_row.addWidget(self.rpc_enabled_check)
+        enabled_row.addStretch(1)
+        layout.addLayout(enabled_row)
+
+        cmd_group = QtWidgets.QGroupBox("Run Command")
+        cmd_lay = QtWidgets.QVBoxLayout(cmd_group)
+        cmd_row = QtWidgets.QHBoxLayout()
+        self.rpc_cmd_edit = QtWidgets.QLineEdit()
+        self.rpc_cmd_edit.setPlaceholderText("Enter a command to run on the real PC...")
+        self.rpc_cmd_edit.returnPressed.connect(self._rpc_run_cmd)
+        cmd_row.addWidget(self.rpc_cmd_edit, 1)
+        run_btn = QtWidgets.QPushButton("Run")
+        run_btn.setObjectName("green")
+        run_btn.clicked.connect(self._rpc_run_cmd)
+        cmd_row.addWidget(run_btn)
+        cmd_lay.addLayout(cmd_row)
+
+        self.rpc_output = QtWidgets.QPlainTextEdit()
+        self.rpc_output.setReadOnly(True)
+        self.rpc_output.setMaximumHeight(200)
+        self.rpc_output.setStyleSheet("background:#0a0a14; font-family: Consolas, monospace;")
+        cmd_lay.addWidget(self.rpc_output)
+        layout.addWidget(cmd_group)
+
+        allowed_group = QtWidgets.QGroupBox("Allowed Commands (comma-separated, empty = all)")
+        allowed_lay = QtWidgets.QVBoxLayout(allowed_group)
+        self.rpc_allowed_edit = QtWidgets.QLineEdit(", ".join(cfg.get("allowed_commands", [])))
+        self.rpc_allowed_edit.setPlaceholderText("dir, echo, ipconfig, ...")
+        allowed_lay.addWidget(self.rpc_allowed_edit)
+        save_allowed = QtWidgets.QPushButton("Save Allowed Commands")
+        save_allowed.clicked.connect(self._rpc_save_allowed)
+        allowed_lay.addWidget(save_allowed, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(allowed_group)
+
+        layout.addStretch()
+
+    def _rpc_run_cmd(self):
+        import subprocess
+        cmd = self.rpc_cmd_edit.text().strip()
+        if not cmd:
+            return
+        self._log(f"[rpc] Running: {cmd}")
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+            out = (r.stdout + r.stderr).strip()
+            self.rpc_output.setPlainText(out or "(no output)")
+            self._log(f"[rpc] Done ({len(out)} chars)")
+        except Exception as e:
+            self.rpc_output.setPlainText(str(e))
+            self._log(f"[rpc] Error: {e}")
+
+    def _rpc_toggle_enabled(self, state):
+        cfg = getattr(bot, "REALPC_CONFIG", {})
+        cfg["enabled"] = bool(state)
+        bot.REALPC_CONFIG = cfg
+        bot.save_config("REALPC_CONFIG", cfg)
+
+    def _rpc_save_allowed(self):
+        cfg = getattr(bot, "REALPC_CONFIG", {})
+        raw = self.rpc_allowed_edit.text().strip()
+        cfg["allowed_commands"] = [s.strip() for s in raw.split(",") if s.strip()] if raw else []
+        bot.REALPC_CONFIG = cfg
+        bot.save_config("REALPC_CONFIG", cfg)
+        self._set_feedback("Allowed commands saved")
 
     def _build_media_page(self):
-        # Preserve both media control surfaces under the Media navigation entry.
         self._build_music_tab()
         self._build_video_tab()
 
@@ -1750,17 +2054,17 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         # ── Quick Actions Row ──
         qa = QtWidgets.QGroupBox("Quick Actions")
         qa_lay = QtWidgets.QHBoxLayout(qa)
-        self._home_start_btn = QtWidgets.QPushButton("\u25B6  Start Bot")
+        self._home_start_btn = QtWidgets.QPushButton("Start Bot")
         self._home_start_btn.setObjectName("green")
         self._home_start_btn.clicked.connect(self._start_bot)
-        self._home_stop_btn = QtWidgets.QPushButton("\u23F9  Stop Bot")
+        self._home_stop_btn = QtWidgets.QPushButton("Stop Bot")
         self._home_stop_btn.setObjectName("red")
         self._home_stop_btn.clicked.connect(self._stop_bot)
-        self._home_restart_btn = QtWidgets.QPushButton("\u21BB  Restart Bot")
+        self._home_restart_btn = QtWidgets.QPushButton("Restart Bot")
         self._home_restart_btn.clicked.connect(self._on_restart_bot_clicked)
-        self._home_pause_btn = QtWidgets.QPushButton("\u23F8  Toggle Chat")
+        self._home_pause_btn = QtWidgets.QPushButton("Toggle Chat")
         self._home_pause_btn.clicked.connect(self._toggle_pausechat)
-        self._home_tray_btn = QtWidgets.QPushButton("\u25C6  Minimize to Tray")
+        self._home_tray_btn = QtWidgets.QPushButton("Minimize to Tray")
         self._home_tray_btn.clicked.connect(self._minimize_to_tray)
         for b in (self._home_start_btn, self._home_stop_btn, self._home_restart_btn,
                   self._home_pause_btn, self._home_tray_btn):
@@ -1941,7 +2245,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         try:
             paused = bool(getattr(bot, "CHAT_COMMANDS_PAUSED", False))
             if paused:
-                self._pausechat_lbl.setText("⏸  Chat commands PAUSED")
+                self._pausechat_lbl.setText("Chat commands PAUSED")
                 self._pausechat_lbl.setStyleSheet(f"color:{self.YELLOW}; font-weight:700;")
             else:
                 self._pausechat_lbl.setText("")
@@ -2000,7 +2304,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Missing Input", "Please enter the Streamer.bot WebSocket port.")
             return
         if self._bot_running:
-            self._log("⚠️ Bot is already running!")
+            self._log("Bot is already running!")
             return
 
         bot.STREAMERBOT_WS_PORT = sb_port
@@ -2044,7 +2348,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         self._console_redir = bot.ConsoleRedirect(self._console)
         self._console_redir.start()
 
-        self._log(f"Starting bot → SB WS port: {bot.STREAMERBOT_WS_PORT}  |  "
+        self._log(f"Starting bot -- SB WS port: {bot.STREAMERBOT_WS_PORT}  |  "
                    f"Twitch: {bot.TWITCH_CHANNEL or '(none)'}  |  VM: {bot.VMX_PATH}")
         bot.notify("Bot Started",
                     f"Streamer.bot WS: {bot.STREAMERBOT_WS_PORT}\n"
@@ -2068,7 +2372,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         self._bot_thread.start()
 
     def _set_status(self, text, color):
-        self._status_dot.setText(f"⬤  {text}")
+        self._status_dot.setText(f"{text}")
         self._status_dot.setStyleSheet(f"color: {color}; font-weight: 700; padding: 2px 8px;")
 
     def _vm_set_last(self, text, color=None):
@@ -2100,13 +2404,13 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(14)
         buttons = [
-            ("▶  Start VM", "green", "Power on the virtual machine.", self._vm_start),
-            ("🔄  Restart VM", "accent", "Send a reset signal to the VM.", self._vm_restart),
-            ("⏮  Revert VM", "accent", f"Power off, restore snapshot '{bot.SNAPSHOT_NAME}', boot.", self._vm_revert),
-            ("⏹  Shutdown VM", "red", "Force power off the virtual machine.", self._vm_shutdown),
-            ("Ⅱ  Pause VM", "accent", "Pause the VM without powering it off.", self._vm_pause),
-            ("▶  Resume VM", "green", "Resume a paused or suspended VM.", self._vm_resume),
-            ("💾  Suspend VM", "accent", "Save VM state and suspend it.", self._vm_suspend),
+            ("Start VM", "green", "Power on the virtual machine.", self._vm_start),
+            ("Restart VM", "accent", "Send a reset signal to the VM.", self._vm_restart),
+            ("Revert VM", "accent", f"Power off, restore snapshot '{bot.SNAPSHOT_NAME}', boot.", self._vm_revert),
+            ("Shutdown VM", "red", "Force power off the virtual machine.", self._vm_shutdown),
+            ("Pause VM", "accent", "Pause the VM without powering it off.", self._vm_pause),
+            ("Resume VM", "green", "Resume a paused or suspended VM.", self._vm_resume),
+            ("Suspend VM", "accent", "Save VM state and suspend it.", self._vm_suspend),
         ]
         for i, (label, style, desc, fn) in enumerate(buttons):
             cell = QtWidgets.QGroupBox()
@@ -2147,7 +2451,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
                 bot.update_status("Starting...")
                 bot.obs_trigger("vm_starting")
                 bot.start_vm()
-                self.after(0, lambda: self._vm_set_last("Started ✔", self.GREEN))
+                self.after(0, lambda: self._vm_set_last("Started OK", self.GREEN))
             except Exception as e:
                 err = f"Error: {e}"
                 self.after(0, lambda: self._vm_set_last(err, self.RED))
@@ -2174,7 +2478,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
                 bot.obs_trigger("restart")
                 bot.obs_trigger("restart_done")
                 bot.apply_current_os_scene()
-                self.after(0, lambda: self._vm_set_last("Restarted ✔", self.GREEN))
+                self.after(0, lambda: self._vm_set_last("Restarted OK", self.GREEN))
             except Exception as e:
                 err = f"Error: {e}"
                 self.after(0, lambda: self._vm_set_last(err, self.RED))
@@ -2211,7 +2515,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
                 bot.apply_current_os_scene()
                 bot.vote_revert.clear()
                 bot.update_votes_json("revert", 0, 2, 0)
-                self.after(0, lambda: self._vm_set_last("Reverted ✔", self.GREEN))
+                self.after(0, lambda: self._vm_set_last("Reverted OK", self.GREEN))
             except Exception as e:
                 bot.update_status("Revert failed")
                 err = f"Error: {e}"
@@ -2241,7 +2545,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
                 bot._checked(bot.vm_stop(bot.VMX_PATH, bot.current_vm_backend, hard=True))
                 bot.update_status("Stopped")
                 bot.obs_trigger("vm_shutdown")
-                self.after(0, lambda: self._vm_set_last("Powered off ✔", self.TEXTDIM))
+                self.after(0, lambda: self._vm_set_last("Powered off OK", self.TEXTDIM))
             except Exception as e:
                 err = f"Error: {e}"
                 self.after(0, lambda: self._vm_set_last(err, self.RED))
@@ -2268,7 +2572,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
                 ok, error = action()
                 if not ok:
                     raise RuntimeError(str(error or "the hypervisor rejected the request"))
-                self.after(0, lambda: self._vm_set_last(success + " ✔", self.GREEN))
+                self.after(0, lambda: self._vm_set_last(success + " OK", self.GREEN))
             except Exception as exc:
                 self.after(0, lambda: self._vm_set_last(f"Error: {exc}", self.RED))
         threading.Thread(target=run, daemon=True).start()
@@ -2311,14 +2615,14 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         layout.addLayout(enable_row)
 
         controls = QtWidgets.QHBoxLayout()
-        play_btn = QtWidgets.QPushButton("▶ Play Selected Schedule")
+        play_btn = QtWidgets.QPushButton("Play Selected Schedule")
         play_btn.setObjectName("green")
         play_btn.clicked.connect(self._music_play_selected_schedule)
-        skip_btn = QtWidgets.QPushButton("⏭ Skip Track")
+        skip_btn = QtWidgets.QPushButton("Skip Track")
         skip_btn.clicked.connect(lambda: (bot.music_skip_track(), self._log("[info] skipped to next track.")))
-        pause_btn = QtWidgets.QPushButton("⏸ Pause/Resume")
+        pause_btn = QtWidgets.QPushButton("Pause / Resume")
         pause_btn.clicked.connect(lambda: bot.music_pause_toggle())
-        stop_btn = QtWidgets.QPushButton("⏹ Stop")
+        stop_btn = QtWidgets.QPushButton("Stop")
         stop_btn.setObjectName("red")
         stop_btn.clicked.connect(lambda: (bot.stop_music_player(), self._log("[info] music stopped.")))
         controls.addWidget(play_btn)
@@ -2370,7 +2674,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         add_t = QtWidgets.QPushButton("+ Add")
         add_t.setObjectName("green")
         add_t.clicked.connect(lambda: self._music_add_url("tracks"))
-        rm_t = QtWidgets.QPushButton("✕ Remove")
+        rm_t = QtWidgets.QPushButton("Remove")
         rm_t.setObjectName("red")
         rm_t.clicked.connect(lambda: self._music_remove_url("tracks"))
         t_btns.addWidget(add_t)
@@ -2386,7 +2690,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         add_p = QtWidgets.QPushButton("+ Add")
         add_p.setObjectName("green")
         add_p.clicked.connect(lambda: self._music_add_url("playlists"))
-        rm_p = QtWidgets.QPushButton("✕ Remove")
+        rm_p = QtWidgets.QPushButton("Remove")
         rm_p.setObjectName("red")
         rm_p.clicked.connect(lambda: self._music_remove_url("playlists"))
         p_btns.addWidget(add_p)
@@ -2579,14 +2883,14 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         layout.addLayout(enable_row)
 
         controls = QtWidgets.QHBoxLayout()
-        play_btn = QtWidgets.QPushButton("▶ Play Selected Schedule")
+        play_btn = QtWidgets.QPushButton("Play Selected Schedule")
         play_btn.setObjectName("green")
         play_btn.clicked.connect(self._video_play_selected_schedule)
-        skip_btn = QtWidgets.QPushButton("⏭ Skip Clip")
+        skip_btn = QtWidgets.QPushButton("Skip Clip")
         skip_btn.clicked.connect(lambda: (bot.video_skip_track(), self._log("[info] skipped to next video clip.")))
-        pause_btn = QtWidgets.QPushButton("⏸ Pause/Resume")
+        pause_btn = QtWidgets.QPushButton("Pause / Resume")
         pause_btn.clicked.connect(bot.video_pause_toggle)
-        stop_btn = QtWidgets.QPushButton("⏹ Stop")
+        stop_btn = QtWidgets.QPushButton("Stop")
         stop_btn.setObjectName("red")
         stop_btn.clicked.connect(lambda: (bot.stop_video_player(), self._log("[info] video stopped.")))
         controls.addWidget(play_btn)
@@ -2634,7 +2938,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         add_v = QtWidgets.QPushButton("+ Add")
         add_v.setObjectName("green")
         add_v.clicked.connect(lambda: self._video_add_url("tracks"))
-        rm_v = QtWidgets.QPushButton("✕ Remove")
+        rm_v = QtWidgets.QPushButton("Remove")
         rm_v.setObjectName("red")
         rm_v.clicked.connect(lambda: self._video_remove_url("tracks"))
         v_btns.addWidget(add_v)
@@ -2650,7 +2954,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         add_p = QtWidgets.QPushButton("+ Add")
         add_p.setObjectName("green")
         add_p.clicked.connect(lambda: self._video_add_url("playlists"))
-        rm_p = QtWidgets.QPushButton("✕ Remove")
+        rm_p = QtWidgets.QPushButton("Remove")
         rm_p.setObjectName("red")
         rm_p.clicked.connect(lambda: self._video_remove_url("playlists"))
         p_btns.addWidget(add_p)
@@ -3062,10 +3366,10 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             esc = QtGui.QTextDocumentFragment.fromPlainText(msg).toHtml()
             msg_html = QtGui.QTextDocumentFragment.fromPlainText(msg).toHtml()
             user_html = QtGui.QTextDocumentFragment.fromPlainText(user).toHtml()
-            platform = (platform or "").lower()
-            if platform == "twitch":
+            platform_name = (platform or "").lower()
+            if platform_name == "twitch":
                 platform_mark = '<span style="color:#9146FF; font-weight:900;">T</span> '
-            elif platform in ("youtube", "yt"):
+            elif platform_name in ("youtube", "yt"):
                 platform_mark = '<span style="color:#FF0000; font-weight:900;">▶</span> '
             else:
                 platform_mark = ''
