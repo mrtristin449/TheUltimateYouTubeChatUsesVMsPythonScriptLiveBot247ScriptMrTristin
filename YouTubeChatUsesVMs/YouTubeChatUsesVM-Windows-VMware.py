@@ -255,6 +255,8 @@ QSlider::handle:horizontal {{
 }}
 QSlider::handle:horizontal:hover {{ background: {t['ACCENT2']}; }}
 QSplitter::handle {{ background: rgba(255,255,255,6); width: 2px; }}
+QScrollArea {{ background: transparent; border: none; }}
+QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QStatusBar {{
     background: {t['TITLEBAR_BG']}; color: {t['TEXTDIM']};
     border-top: 1px solid rgba(255,255,255,8);
@@ -277,6 +279,9 @@ QListWidget::item:selected {{
 QListWidget::item:hover {{
     background: rgba(255,255,255,8);
 }}
+QLabel#h1 {{ color: {t['ACCENT']}; font-size: 20px; font-weight: 700; }}
+QLabel#dim {{ color: {t['TEXTDIM']}; font-size: 12px; }}
+QStackedWidget {{ background: transparent; }}
 """
 
 def _load_saved_theme():
@@ -672,7 +677,13 @@ class BackendConfigTab(QtWidgets.QWidget):
         self.name = name
         self.config_names = config_names
         self._bindings = []
-        layout = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(20, 18, 20, 18)
         heading = QtWidgets.QLabel(name)
         heading.setObjectName("h1")
@@ -699,6 +710,8 @@ class BackendConfigTab(QtWidgets.QWidget):
         buttons.addWidget(save)
         buttons.addStretch(1)
         layout.addLayout(buttons)
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
         self.load_config()
 
     def _clear_form(self):
@@ -858,13 +871,21 @@ class FeatureTab(QtWidgets.QWidget):
     def __init__(self, name, parent=None):
         super().__init__(parent)
         self.name = name
-        self.layout = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        container = QtWidgets.QWidget()
+        self.layout = QtWidgets.QVBoxLayout(container)
         self.layout.setContentsMargins(20, 18, 20, 18)
         title = QtWidgets.QLabel(name)
         title.setObjectName("h1")
         self.layout.addWidget(title)
         self._build()
         self.layout.addStretch(1)
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
 
     def _build(self):
         if self.name == "Statistics":
@@ -1153,7 +1174,13 @@ class ObsTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.rows = []
-        layout = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(20, 18, 20, 18)
         title = QtWidgets.QLabel("OBS WebSocket Integration")
         title.setObjectName("h1")
@@ -1212,6 +1239,8 @@ class ObsTab(QtWidgets.QWidget):
         if not self.rows:
             for event in self.EVENTS[:6]:
                 self.add_trigger_row(event, "")
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
 
     def add_trigger_row(self, event="", scene=""):
         row = QtWidgets.QWidget()
@@ -1736,16 +1765,27 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         left_layout.setSpacing(0)
 
         self._sidebar = QtWidgets.QFrame()
-        self._sidebar.setFixedWidth(180)
+        self._sidebar.setFixedWidth(220)
         self._sidebar.setStyleSheet(
             f"QFrame {{ background: {self.BG2}; border-right: 1px solid {self.BG3}; }}")
-        sb_lay = QtWidgets.QVBoxLayout(self._sidebar)
+        sb_outer = QtWidgets.QVBoxLayout(self._sidebar)
+        sb_outer.setContentsMargins(0, 0, 0, 0)
+        sb_outer.setSpacing(0)
+
+        sb_scroll = QtWidgets.QScrollArea()
+        sb_scroll.setWidgetResizable(True)
+        sb_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        sb_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sb_scroll.setStyleSheet(f"QScrollArea {{ background: transparent; border: none; }}")
+        sb_inner = QtWidgets.QWidget()
+        sb_inner.setStyleSheet(f"background: transparent;")
+        sb_lay = QtWidgets.QVBoxLayout(sb_inner)
         sb_lay.setContentsMargins(8, 12, 8, 8)
         sb_lay.setSpacing(2)
+        sb_scroll.setWidget(sb_inner)
+        sb_outer.addWidget(sb_scroll, 1)
 
         self._pages = QtWidgets.QStackedWidget()
-        # The original tab builders use `self.tabs`; keep a compatibility alias
-        # while the new shell uses a stacked page navigator.
         self.tabs = _StackedTabCompat(self._pages)
         self._sidebar_btns = []
         self._sidebar_sections = []
@@ -1760,10 +1800,11 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
 
         def _add_nav(text, icon_name=None):
             btn = QtWidgets.QPushButton(f"  {text}")
+            btn.setIconSize(QtCore.QSize(16, 16))
             if icon_name:
-                btn.setIcon(self._mk_icon(icon_name, self.TEXTDIM, 18))
+                btn.setIcon(self._mk_icon(icon_name, self.TEXTDIM, 16))
             btn.setStyleSheet(
-                f"QPushButton {{ text-align: left; padding: 8px 12px; border-radius: 6px; "
+                f"QPushButton {{ text-align: left; padding: 8px 8px 8px 4px; border-radius: 6px; "
                 f"color: {self.TEXTDIM}; font-size: 12px; font-weight: 500; border: none; background: transparent; }} "
                 f"QPushButton:hover {{ background: rgba(255,255,255,0.05); color: {self.TEXT}; }}")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1786,7 +1827,6 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         self._nav_settings = _add_nav("Settings", "gear")
         self._nav_config = _add_nav("Config", "document")
         _add_section("Advanced")
-        self._backend_nav_btns = {}
         _backend_icon_map = {
             "OS Voting": "shield", "Appearance": "gear", "OBS": "vm",
             "Statistics": "document", "User Management": "pc",
@@ -1798,8 +1838,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             "Host Switch": "host",
         }
         for name in PLACEHOLDER_TABS:
-            nav = _add_nav(name, _backend_icon_map.get(name, "document"))
-            self._backend_nav_btns[name] = nav
+            _add_nav(name, _backend_icon_map.get(name, "document"))
         sb_lay.addStretch(1)
 
         left_layout.addWidget(self._sidebar)
@@ -1815,9 +1854,6 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         self._build_permissions_page()
         self._build_settings_page()
         self._build_config_editor_tab()
-        # Placeholder pages are appended after the core pages; navigation uses
-        # this saved base index for the advanced sidebar entries.
-        self._backend_tab_start_index = self._pages.count()
         for name in PLACEHOLDER_TABS:
             self._build_backend_tab(name)
 
@@ -1848,18 +1884,14 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
 
     def _nav_to(self, btn):
         idx = self._sidebar_btns.index(btn)
-        for name, nav_btn in self._backend_nav_btns.items():
-            if btn is nav_btn:
-                idx = self._backend_tab_start_index + PLACEHOLDER_TABS.index(name)
-                break
         self._pages.setCurrentIndex(idx)
         for b in self._sidebar_btns:
             b.setStyleSheet(
-                f"QPushButton {{ text-align: left; padding: 8px 12px; border-radius: 6px; "
+                f"QPushButton {{ text-align: left; padding: 8px 8px 8px 4px; border-radius: 6px; "
                 f"color: {self.TEXTDIM}; font-size: 12px; font-weight: 500; border: none; background: transparent; }} "
                 f"QPushButton:hover {{ background: rgba(255,255,255,0.05); color: {self.TEXT}; }}")
         btn.setStyleSheet(
-            f"QPushButton {{ text-align: left; padding: 8px 12px; border-radius: 6px; "
+            f"QPushButton {{ text-align: left; padding: 8px 8px 8px 4px; border-radius: 6px; "
             f"color: {self.ACCENT}; font-size: 12px; font-weight: 700; border: none; "
             f"background: rgba(96,205,255,0.1); }}")
 
@@ -1984,14 +2016,14 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         cfg = getattr(bot, "REALPC_CONFIG", {})
         cfg["enabled"] = bool(state)
         bot.REALPC_CONFIG = cfg
-        bot.save_config("REALPC_CONFIG", cfg)
+        bot.save_realpc_config()
 
     def _rpc_save_allowed(self):
         cfg = getattr(bot, "REALPC_CONFIG", {})
         raw = self.rpc_allowed_edit.text().strip()
-        cfg["allowed_commands"] = [s.strip() for s in raw.split(",") if s.strip()] if raw else []
+        cfg["allowed_commands"] = [c.strip() for c in raw.split(",") if c.strip()]
         bot.REALPC_CONFIG = cfg
-        bot.save_config("REALPC_CONFIG", cfg)
+        bot.save_realpc_config()
         self._set_feedback("Allowed commands saved")
 
     def _build_media_page(self):
@@ -2025,16 +2057,17 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         cards = QtWidgets.QHBoxLayout()
         cards.setSpacing(12)
 
-        def _status_card(label, icon_text, color):
+        def _status_card(label, icon_name, color):
             card = QtWidgets.QFrame()
             card.setStyleSheet(
                 f"QFrame {{ background: {self.BG3}; border-radius: 10px; border: 1px solid {self.BG4}; }}")
             card.setFixedHeight(90)
             cl = QtWidgets.QVBoxLayout(card)
             cl.setContentsMargins(14, 12, 14, 12)
-            lbl_icon = QtWidgets.QLabel(icon_text)
-            lbl_icon.setStyleSheet(f"font-size: 20px; color: {color};")
-            cl.addWidget(lbl_icon)
+            icon_lbl = QtWidgets.QLabel()
+            icon_lbl.setPixmap(self._mk_icon(icon_name, color, 22))
+            icon_lbl.setFixedSize(22, 22)
+            cl.addWidget(icon_lbl)
             lbl_name = QtWidgets.QLabel(label)
             lbl_name.setStyleSheet(f"font-size: 10px; color: {self.TEXTDIM}; font-weight: 600;")
             cl.addWidget(lbl_name)
@@ -2043,10 +2076,10 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             cl.addWidget(lbl_val)
             return card, lbl_val
 
-        self._home_bot_card, self._home_bot_lbl = _status_card("Bot Status", "\u26A1", self.ACCENT)
-        self._home_vm_card, self._home_vm_lbl = _status_card("VM", "\u2630", self.GREEN)
-        self._home_flask_card, self._home_flask_lbl = _status_card("Overlay Server", "\u25CE", self.YELLOW)
-        self._home_rpc_card, self._home_rpc_lbl = _status_card("Real PC", "\u2318", self.TEXTDIM)
+        self._home_bot_card, self._home_bot_lbl = _status_card("Bot Status", "robot", self.ACCENT)
+        self._home_vm_card, self._home_vm_lbl = _status_card("VM", "vm", self.GREEN)
+        self._home_flask_card, self._home_flask_lbl = _status_card("Overlay Server", "server", self.YELLOW)
+        self._home_rpc_card, self._home_rpc_lbl = _status_card("Real PC", "pc", self.TEXTDIM)
         for c in (self._home_bot_card, self._home_vm_card, self._home_flask_card, self._home_rpc_card):
             cards.addWidget(c)
         layout.addLayout(cards)
@@ -2131,8 +2164,10 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
         conn_lay.addWidget(QtWidgets.QLabel("VM"), 3, 0)
         self.vm_combo = QtWidgets.QComboBox()
         conn_lay.addWidget(self.vm_combo, 3, 1)
-        btn_ref = QtWidgets.QPushButton("\u21BB")
-        btn_ref.setFixedWidth(36)
+        btn_ref = QtWidgets.QPushButton()
+        btn_ref.setIcon(self._mk_icon("refresh", self.TEXT, 14))
+        btn_ref.setIconSize(QtCore.QSize(14, 14))
+        btn_ref.setFixedSize(36, 36)
         btn_ref.clicked.connect(self._refresh_vm_list)
         conn_lay.addWidget(btn_ref, 3, 2)
         self.auto_start_check = CheckBox("Auto-restart VM if found powered off")
@@ -3366,10 +3401,10 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             esc = QtGui.QTextDocumentFragment.fromPlainText(msg).toHtml()
             msg_html = QtGui.QTextDocumentFragment.fromPlainText(msg).toHtml()
             user_html = QtGui.QTextDocumentFragment.fromPlainText(user).toHtml()
-            platform_name = (platform or "").lower()
-            if platform_name == "twitch":
+            platform = (platform or "").lower()
+            if platform == "twitch":
                 platform_mark = '<span style="color:#9146FF; font-weight:900;">T</span> '
-            elif platform_name in ("youtube", "yt"):
+            elif platform in ("youtube", "yt"):
                 platform_mark = '<span style="color:#FF0000; font-weight:900;">▶</span> '
             else:
                 platform_mark = ''
