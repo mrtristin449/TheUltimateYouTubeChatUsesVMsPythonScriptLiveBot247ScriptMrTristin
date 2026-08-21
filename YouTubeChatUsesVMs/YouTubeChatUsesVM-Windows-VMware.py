@@ -2065,7 +2065,7 @@ class UltraBotGUIQt(QtWidgets.QMainWindow):
             cl = QtWidgets.QVBoxLayout(card)
             cl.setContentsMargins(14, 12, 14, 12)
             icon_lbl = QtWidgets.QLabel()
-            icon_lbl.setPixmap(self._mk_icon(icon_name, color, 22))
+            icon_lbl.setPixmap(self._mk_icon(icon_name, color, 22).pixmap(22, 22))
             icon_lbl.setFixedSize(22, 22)
             cl.addWidget(icon_lbl)
             lbl_name = QtWidgets.QLabel(label)
