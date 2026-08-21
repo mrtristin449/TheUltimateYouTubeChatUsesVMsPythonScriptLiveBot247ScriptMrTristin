@@ -208,12 +208,12 @@ if platform.system() == "Windows" and not _is_admin():
 # ========================= VERSION & AUTO-UPDATE =========================
 # The first startup uses 1.0 and persists the current version beside this script.
 # Accepted updates overwrite this file with the newer version from version.json.
-_DEFAULT_APP_VERSION = "1.0"
+_DEFAULT_APP_VERSION = "1.16"
 _APP_VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_version.txt")
 
 
 def _load_app_version():
-    """Load the persisted application version, initializing it to 1.0 once."""
+    """Load the persisted application version, initializing it to 1.16 once."""
     env_version = os.environ.get("APP_VERSION", "").strip()
     if env_version:
         return env_version
@@ -4104,7 +4104,9 @@ def run_single_bot_command(line, username="admin", is_mod=True, is_owner=True):
                 pass
         elif cmd in ("play", "music", "songrequest", "sr"):
             if args.strip():
-                threading.Thread(target=queue_song_request, args=(args, username), kwargs={"is_mod": is_mod}, daemon=True).start()
+                media_raw, resume_seconds = _parse_media_timestamp(args)
+                _set_resume_target("music", media_raw, resume_seconds)
+                threading.Thread(target=queue_song_request, args=(media_raw, username), kwargs={"is_mod": is_mod, "resume_seconds": resume_seconds}, daemon=True).start()
             else:
                 threading.Thread(target=start_music_player, daemon=True).start()
         elif cmd in ("findsr",):
@@ -4126,7 +4128,9 @@ def run_single_bot_command(line, username="admin", is_mod=True, is_owner=True):
             music_set_volume(float(args))
         elif cmd in ("video", "videorequest", "vr"):
             if args.strip():
-                threading.Thread(target=queue_video_request, args=(args, username), kwargs={"is_mod": is_mod}, daemon=True).start()
+                media_raw, resume_seconds = _parse_media_timestamp(args)
+                _set_resume_target("video", media_raw, resume_seconds)
+                threading.Thread(target=queue_video_request, args=(media_raw, username), kwargs={"is_mod": is_mod, "resume_seconds": resume_seconds}, daemon=True).start()
             else:
                 threading.Thread(target=start_video_player, daemon=True).start()
         elif cmd in ("findvr",):
@@ -6546,6 +6550,100 @@ music_queue_source_url = ""
 # ---- !sr song requests: queued and played at the NEXT scheduled music change, not immediately ----
 music_song_requests = []  # list of {"url": watch/playlist url, "is_playlist": bool, "raw": original text, "user": requester}
 
+# ========================= AUTO-RESUME MEDIA STATE =========================
+# Stores the current YouTube ID and VLC position for !sr and !vr playback. The
+# file is written once per second so an update/relaunch can resume near the last
+# known position without touching the existing music/video config files.
+AUTO_RESUME_MEDIA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_resume_media.json")
+_auto_resume_lock = threading.RLock()
+auto_resume_media = {
+    "music": {"video_id": "", "timestamp": 0.0},
+    "video": {"video_id": "", "timestamp": 0.0},
+}
+_auto_resume_stop = threading.Event()
+_auto_resume_thread = None
+
+def _load_auto_resume_media():
+    try:
+        if os.path.exists(AUTO_RESUME_MEDIA_FILE):
+            with open(AUTO_RESUME_MEDIA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            with _auto_resume_lock:
+                for kind in ("music", "video"):
+                    if isinstance(data.get(kind), dict):
+                        auto_resume_media[kind].update(data[kind])
+    except Exception as e:
+        print(f'[MediaResume] Load error: Python exception: "{traceback.format_exc()}"')
+
+def _save_auto_resume_media():
+    try:
+        with _auto_resume_lock:
+            data = json.loads(json.dumps(auto_resume_media))
+        tmp = AUTO_RESUME_MEDIA_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, AUTO_RESUME_MEDIA_FILE)
+    except Exception:
+        pass
+
+def _youtube_video_id(value):
+    value = str(value or "").strip().strip("<>")
+    for pattern in (r"[?&]v=([A-Za-z0-9_-]{11})", r"youtu\.be/([A-Za-z0-9_-]{11})", r"(?:embed|shorts)/([A-Za-z0-9_-]{11})"):
+        m = re.search(pattern, value)
+        if m: return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", value): return value
+    return ""
+
+def _parse_media_timestamp(value):
+    """Return (request_without_timestamp, seconds), accepting 1:16, 01:16, 1:02:03, or seconds."""
+    raw = (value or "").strip()
+    m = re.search(r"(?:^|\s)(\d{1,2}:\d{2}(?::\d{2})?|\d{1,6})\s*$", raw)
+    if not m: return raw, 0.0
+    token = m.group(1)
+    # A bare number is treated as a timestamp only when the request has a URL/ID;
+    # this preserves normal !sr search text such as "2024".
+    if ":" not in token and not (_youtube_video_id(raw[:m.start()].strip())):
+        return raw, 0.0
+    try:
+        parts = [int(x) for x in token.split(":")]
+        seconds = float(parts[-1] + (parts[-2] * 60 if len(parts) >= 2 else 0) + (parts[-3] * 3600 if len(parts) == 3 else 0))
+        return raw[:m.start()].strip(), max(0.0, seconds)
+    except Exception:
+        return raw, 0.0
+
+def _set_resume_target(kind, watch_url, timestamp=0.0):
+    vid = _youtube_video_id(watch_url)
+    if not vid: return
+    with _auto_resume_lock:
+        auto_resume_media[kind] = {"video_id": vid, "timestamp": max(0.0, float(timestamp or 0.0))}
+
+def _start_auto_resume_saver():
+    global _auto_resume_thread
+    if _auto_resume_thread and _auto_resume_thread.is_alive(): return
+    _auto_resume_stop.clear()
+    def _loop():
+        while not _auto_resume_stop.wait(1.0):
+            try:
+                with _auto_resume_lock:
+                    if music_media_player is not None:
+                        mid = music_media_player.get_time()
+                        if mid is not None and mid >= 0 and music_queue_source_url:
+                            vid = _youtube_video_id(music_queue_source_url)
+                            if vid:
+                                auto_resume_media["music"] = {"video_id": vid, "timestamp": round(mid / 1000.0, 2)}
+                    if video_media_player is not None:
+                        vid_time = video_media_player.get_time()
+                        if vid_time is not None and vid_time >= 0 and video_queue_source_url:
+                            vid = _youtube_video_id(video_queue_source_url)
+                            if vid:
+                                auto_resume_media["video"] = {"video_id": vid, "timestamp": round(vid_time / 1000.0, 2)}
+                _save_auto_resume_media()
+            except Exception: pass
+    _auto_resume_thread = threading.Thread(target=_loop, daemon=True, name="media_resume_saver")
+    _auto_resume_thread.start()
+
+_load_auto_resume_media()
+
 def _music_parse_request(raw):
     """Turns a video id/url or playlist id/url into (watch_or_playlist_url, is_playlist)."""
     raw = (raw or "").strip().strip("<>").strip()
@@ -6581,7 +6679,7 @@ def media_request_allowed(username: str = "", *, kind: str = "song", is_mod: boo
     label = "song" if kind == "song" else "video"
     return False, f"Moderator-only mode is active: only moderators can queue !{label} requests."
 
-def queue_song_request(raw, user="", is_mod=False):
+def queue_song_request(raw, user="", is_mod=False, resume_seconds=0.0):
     """Queues a !sr request; it plays automatically the next time the music schedule advances.
     Respects the moderator-only restriction (MEDIA_REQUEST_RESTRICTED) and checks that
     music playback is actually enabled before queuing -- no need to toggle it off/on manually."""
@@ -6601,7 +6699,7 @@ def queue_song_request(raw, user="", is_mod=False):
     url, is_playlist = _music_parse_request(raw)
     if not url: return None
     with music_lock:
-        music_song_requests.append({"url": url, "is_playlist": is_playlist, "raw": raw, "user": user})
+        music_song_requests.append({"url": url, "is_playlist": is_playlist, "raw": raw, "user": user, "resume_seconds": float(resume_seconds or 0.0)})
     return url, is_playlist
 
 def find_youtube_video_id(query):
@@ -6654,7 +6752,7 @@ def _music_advance_queue():
         target = music_queue[music_queue_index]
     _music_play_queue_current(target)
 
-def _music_play_queue_current(watch_url, _attempt=1):
+def _music_play_queue_current(watch_url, _attempt=1, resume_seconds=0.0):
     global music_media_player, music_status_text, music_current_desc
     inst = _music_get_vlc_instance()
     if inst is None:
@@ -6667,7 +6765,7 @@ def _music_play_queue_current(watch_url, _attempt=1):
             console_log("WARN", f"[music] {music_status_text}")
             def _retry():
                 time.sleep(2.5)
-                _music_play_queue_current(watch_url, _attempt + 1)
+                _music_play_queue_current(watch_url, _attempt + 1, resume_seconds=resume_seconds)
             threading.Thread(target=_retry, daemon=True).start()
             return False
         music_status_text = f"failed to resolve after 3 attempts, skipping: {watch_url}"
@@ -6690,6 +6788,13 @@ def _music_play_queue_current(watch_url, _attempt=1):
         ev.event_attach(_vlc.EventType.MediaPlayerEndReached, _music_on_end_reached)
         ev.event_attach(_vlc.EventType.MediaPlayerEncounteredError, _music_on_playback_error)
         mp.play()
+        _set_resume_target("music", watch_url, resume_seconds)
+        if resume_seconds:
+            def _resume_music_position():
+                time.sleep(0.8)
+                try: mp.set_time(int(float(resume_seconds) * 1000))
+                except Exception: pass
+            threading.Thread(target=_resume_music_position, daemon=True).start()
         old = music_media_player
         music_media_player = mp
         try:
@@ -6706,7 +6811,7 @@ def _music_play_queue_current(watch_url, _attempt=1):
         notify("Music Error", str(e), timeout=5)
         return False
 
-def music_play_url(url, shuffle_loop=False):
+def music_play_url(url, shuffle_loop=False, resume_seconds=0.0):
     """Start playing a single track, or (if shuffle_loop) a playlist url shuffled+looping."""
     global music_queue, music_queue_index, music_queue_is_playlist, music_queue_source_url, music_status_text
     if not vlc_available or not ytdlp_available:
@@ -6726,7 +6831,7 @@ def music_play_url(url, shuffle_loop=False):
         music_queue_is_playlist = shuffle_loop
         music_queue_source_url = url
         first = music_queue[0]
-    return _music_play_queue_current(first)
+    return _music_play_queue_current(first, resume_seconds=resume_seconds)
 
 def music_skip_track():
     """Manually skip to the next track in the current queue."""
@@ -6772,7 +6877,7 @@ def music_player_loop():
             hours = float(music_config.get("change_hours", 1) or 1)
 
         if pending:
-            music_play_url(pending["url"], shuffle_loop=pending["is_playlist"])
+            music_play_url(pending["url"], shuffle_loop=pending["is_playlist"], resume_seconds=pending.get("resume_seconds", 0.0))
             kind = "playlist" if pending["is_playlist"] else "track"
             who = f" (requested by {pending['user']})" if pending.get("user") else ""
             notify("Song Request", f"Now playing requested {kind}{who}.", timeout=5)
@@ -6926,7 +7031,7 @@ video_queue_source_url = ""
 # ---- !vr video requests: queued and played at the NEXT scheduled video change, not immediately ----
 video_requests = []  # list of {"url": watch/playlist url, "is_playlist": bool, "raw": original text, "user": requester}
 
-def queue_video_request(raw, user="", is_mod=False):
+def queue_video_request(raw, user="", is_mod=False, resume_seconds=0.0):
     """Queues a !vr request; it plays automatically the next time the video schedule advances.
     Respects the moderator-only restriction (MEDIA_REQUEST_RESTRICTED) and checks that
     video playback is actually enabled before queuing -- no need to toggle it off/on manually."""
@@ -6946,7 +7051,7 @@ def queue_video_request(raw, user="", is_mod=False):
     url, is_playlist = _video_parse_request(raw)
     if not url: return None
     with video_lock:
-        video_requests.append({"url": url, "is_playlist": is_playlist, "raw": raw, "user": user})
+        video_requests.append({"url": url, "is_playlist": is_playlist, "raw": raw, "user": user, "resume_seconds": float(resume_seconds or 0.0)})
     return url, is_playlist
 
 def _video_on_end_reached(event):
@@ -6983,7 +7088,7 @@ def _video_advance_queue():
         target = video_queue[video_queue_index]
     _video_play_queue_current(target)
 
-def _video_play_queue_current(watch_url, _attempt=1):
+def _video_play_queue_current(watch_url, _attempt=1, resume_seconds=0.0):
     global video_media_player, video_status_text, video_current_desc
     inst = _video_get_vlc_instance()
     if inst is None:
@@ -6996,7 +7101,7 @@ def _video_play_queue_current(watch_url, _attempt=1):
             console_log("WARN", f"[video] {video_status_text}")
             def _retry():
                 time.sleep(2.5)
-                _video_play_queue_current(watch_url, _attempt + 1)
+                _video_play_queue_current(watch_url, _attempt + 1, resume_seconds=resume_seconds)
             threading.Thread(target=_retry, daemon=True).start()
             return False
         video_status_text = f"failed to resolve after 3 attempts, skipping: {watch_url}"
@@ -7031,6 +7136,13 @@ def _video_play_queue_current(watch_url, _attempt=1):
         ev.event_attach(_vlc.EventType.MediaPlayerEndReached, _video_on_end_reached)
         ev.event_attach(_vlc.EventType.MediaPlayerEncounteredError, _video_on_playback_error)
         mp.play()
+        _set_resume_target("video", watch_url, resume_seconds)
+        if resume_seconds:
+            def _resume_video_position():
+                time.sleep(0.8)
+                try: mp.set_time(int(float(resume_seconds) * 1000))
+                except Exception: pass
+            threading.Thread(target=_resume_video_position, daemon=True).start()
         old = video_media_player
         video_media_player = mp
         try:
@@ -7050,7 +7162,7 @@ def _video_play_queue_current(watch_url, _attempt=1):
         notify("Video Error", str(e), timeout=5)
         return False
 
-def video_play_url(url, shuffle_loop=False):
+def video_play_url(url, shuffle_loop=False, resume_seconds=0.0):
     """Start playing a single clip, or (if shuffle_loop) a playlist url shuffled+looping."""
     global video_queue, video_queue_index, video_queue_is_playlist, video_queue_source_url, video_status_text
     if not vlc_available or not ytdlp_available:
@@ -7070,7 +7182,7 @@ def video_play_url(url, shuffle_loop=False):
         video_queue_is_playlist = shuffle_loop
         video_queue_source_url = url
         first = video_queue[0]
-    return _video_play_queue_current(first)
+    return _video_play_queue_current(first, resume_seconds=resume_seconds)
 
 def video_skip_track():
     """Manually skip to the next clip in the current queue."""
@@ -7116,7 +7228,7 @@ def video_player_loop():
             hours = float(video_config.get("change_hours", 1) or 1)
 
         if pending:
-            video_play_url(pending["url"], shuffle_loop=pending["is_playlist"])
+            video_play_url(pending["url"], shuffle_loop=pending["is_playlist"], resume_seconds=pending.get("resume_seconds", 0.0))
             kind = "playlist" if pending["is_playlist"] else "video"
             who = f" (requested by {pending['user']})" if pending.get("user") else ""
             notify("Video Request", f"Now playing requested {kind}{who}.", timeout=5)
@@ -16615,6 +16727,7 @@ if __name__ == '__main__':
             logger.info("Initializing UltraBotGUI class...")
             logger.handlers[0].flush()
             app  = UltraBotGUI(root)   # builds GUI while root is still hidden
+            _start_auto_resume_saver()
             logger.info("GUI initialization complete")
             logger.handlers[0].flush()
         except Exception as e:
@@ -16711,6 +16824,19 @@ if __name__ == '__main__':
                         time.sleep(0.25)
                         start_music_player()
                         print("[info] music player enabled.")
+                    # Resume the last saved !vr/!sr YouTube clips after the player
+                    # loops are alive. Each loop will continue its normal lifecycle.
+                    time.sleep(1.0)
+                    with _auto_resume_lock:
+                        resume_snapshot = json.loads(json.dumps(auto_resume_media))
+                    if video_config.get("enabled", False) and resume_snapshot["video"].get("video_id"):
+                        vid = resume_snapshot["video"]["video_id"]
+                        video_play_url(f"https://www.youtube.com/watch?v={vid}", resume_seconds=resume_snapshot["video"].get("timestamp", 0.0))
+                        print(f"[AutoStart] Resuming video {vid} at {resume_snapshot['video'].get('timestamp', 0.0)}s")
+                    if music_config.get("enabled", False) and resume_snapshot["music"].get("video_id"):
+                        vid = resume_snapshot["music"]["video_id"]
+                        music_play_url(f"https://www.youtube.com/watch?v={vid}", resume_seconds=resume_snapshot["music"].get("timestamp", 0.0))
+                        print(f"[AutoStart] Resuming song {vid} at {resume_snapshot['music'].get('timestamp', 0.0)}s")
                 except Exception:
                     print(f'[AutoStart] Media player relaunch reset failed: Python exception: "{traceback.format_exc()}"')
 
